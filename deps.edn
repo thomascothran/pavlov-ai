@@ -1,9 +1,14 @@
 {:paths ["src" "resources"]
- :deps {tech.thomascothran/pavlov {:local/root "../pavlov"}
+ :deps {tech.thomascothran/pavlov {:mvn/version "4.0.272"}
+        metosin/malli {:mvn/version "0.20.1"}
         org.clojure/data.json {:mvn/version "2.5.2"}
         hato/hato {:mvn/version "1.0.0"}}
  :aliases
  {:dev {:extra-paths ["dev"]}
+  :test {:extra-paths ["test"]
+         :extra-deps {tech.thomascothran/pavlov-devtools {:mvn/version "4.0.272"}
+                      lambdaisland/kaocha {:mvn/version "1.91.1392"}}
+         :exec-fn kaocha.runner/exec-fn}
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.9.6"}
                  slipset/deps-deploy {:mvn/version "0.2.0"}}
           :ns-default build}}}

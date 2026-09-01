@@ -10,7 +10,7 @@
 
 (defn- pom-template [version]
   [[:description "Pavlov AI"]
-   [:url "https://github.com/thomascothran/pavlov"]
+   [:url "https://github.com/thomascothran/pavlov-ai"]
    [:licenses
     [:license
      [:name "Eclipse Public License"]
@@ -19,9 +19,9 @@
     [:developer
      [:name "Thomas Cothran"]]]
    [:scm
-    [:url "https://github.com/thomascothran/pavlov"]
-    [:connection "scm:git:https://github.com/thomascothran/pavlov.git"]
-    [:developerConnection "scm:git:ssh:git@github.com:thomascothran/pavlov.git"]
+    [:url "https://github.com/thomascothran/pavlov-ai"]
+    [:connection "scm:git:https://github.com/thomascothran/pavlov-ai.git"]
+    [:developerConnection "scm:git:ssh:git@github.com:thomascothran/pavlov-ai.git"]
     [:tag (str "v" version)]]])
 
 (defn- jar-opts [opts]

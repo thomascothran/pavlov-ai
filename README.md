@@ -4,6 +4,16 @@ Pavlov AI provides bthreads and event conventions for composing LLM-backed agent
 
 The main design rule is that an agent bthread should stay pure: it requests LLM/tool work as Pavlov events, and separate runtime bthreads or subscribers perform side effects and answer with configured response event types.
 
+## Development
+
+Pavlov AI is maintained independently from the [Pavlov](https://github.com/thomascothran/pavlov) repository and uses its released library artifact.
+
+Run the test suite with:
+
+```shell
+clojure -X:test
+```
+
 ## Addressed event types
 
 Agents should usually use event types that include the agent id instead of relying on shared event types plus ad-hoc filtering.
