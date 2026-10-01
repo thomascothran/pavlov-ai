@@ -8,11 +8,19 @@ The main design rule is that an agent bthread should stay pure: it requests LLM/
 
 Pavlov AI is maintained independently from the [Pavlov](https://github.com/thomascothran/pavlov) repository and uses its released library artifact.
 
-Run the test suite with:
+Enter the reproducible development environment with:
 
 ```shell
-clojure -X:test
+devenv shell
 ```
+
+If you use direnv, allow the included `.envrc` instead. Inside the environment, run the test suite with:
+
+```shell
+clj-test
+```
+
+Use `test-watch` to rerun tests as files change and `clj-build` to build the JAR.
 
 ## Addressed event types
 
