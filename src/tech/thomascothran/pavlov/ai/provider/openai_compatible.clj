@@ -314,3 +314,67 @@
              :messages [{:role "user"
                          :content "Say hello in one short sentence."}]}}))
   (provider/normalize-chat-completion :openai-compatible r))
+
+(defn- structured-response
+  [{:keys [status body]}]
+  (cond
+    (not (integer? status))
+    (failure :cognitect.anomalies/fault :malformed-http-response
+             "Provider response is missing an integer status" {})
+
+    (not (successful-status? status))
+    (assoc (failure (http-status-category status) :provider-http-error
+                    "Provider returned an unsuccessful HTTP status" {})
+           :status status)
+
+    :else
+    (let [decoded (try
+                    (decode-response-body body)
+                    (catch Exception _
+                      (malformed "Provider response is not valid JSON")))
+          choice (first (when (sequential? (:choices decoded)) (:choices decoded)))
+          message (:message choice)]
+      (cond
+        (provider/anomaly? decoded) decoded
+        (:error decoded)
+        (failure :cognitect.anomalies/fault :provider-error
+                 "Provider returned an error" {})
+        (:refusal message)
+        (failure :cognitect.anomalies/forbidden :refusal
+                 "Model refused the request" {})
+        (= "content_filter" (:finish_reason choice))
+        (failure :cognitect.anomalies/forbidden :content-filter
+                 "Model output was filtered" {})
+        (not= "stop" (:finish_reason choice))
+        (failure :cognitect.anomalies/fault :incomplete-output
+                 "Model output did not complete normally" {})
+        (or (not= "assistant" (:role message))
+            (seq (:tool_calls message))
+            (not (string? (:content message))))
+        (malformed "Provider did not return structured content")
+        :else {:json (:content message)}))))
+
+(defmethod provider/structured-output! :openai-compatible
+  [_provider {:keys [post! url model input json-schema] :as options}]
+  (if-not (and (ifn? post!) (string? url) (string? model) (string? input))
+    (failure :cognitect.anomalies/incorrect :invalid-options
+             "Structured calls require :post!, :url, :model and string :input" {})
+    (try
+      (structured-response
+       (post! url
+              (request-options
+               (assoc options :body
+                      {:model model
+                       :messages [{:role "user" :content input}]
+                       :response_format {:type "json_schema"
+                                         :json_schema {:name "pavlov_result"
+                                                       :schema json-schema}}}))))
+      (catch java.net.SocketTimeoutException _
+        (failure :cognitect.anomalies/interrupted :timeout
+                 "Model request timed out" {}))
+      (catch java.net.http.HttpTimeoutException _
+        (failure :cognitect.anomalies/interrupted :timeout
+                 "Model request timed out" {}))
+      (catch java.io.IOException _
+        (failure :cognitect.anomalies/unavailable :connection-failure
+                 "Model transport failed" {})))))

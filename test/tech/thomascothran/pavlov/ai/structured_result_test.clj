@@ -137,3 +137,52 @@
       (is (= [:review 42] (:call-id event)))
       (is (anomaly? (:anomaly event)))
       (is (not (contains? event :data))))))
+
+(deftest json-values-are-not-confused-with-missing-results
+  (doseq [[s content expected] [[[:maybe :string] "null" nil]
+                               [[:boolean] "false" false]
+                               [[:map [:labels [:set :keyword]]]
+                                "{\"labels\":[\"urgent\",\"boss\"]}"
+                                {:labels #{:urgent :boss}}]]]
+    (is (= expected
+           (ai/call! (assoc (request (fn [_ _] (completion content))) :schema s))))))
+
+(deftest invalid-schema-fails-before-network-work
+  (let [calls (atom 0)
+        result (ai/call! (assoc (request (fn [_ _] (swap! calls inc)))
+                                :schema [:not-a-malli-schema]))]
+    (is (anomaly? result))
+    (is (= :invalid-schema (:kind result)))
+    (is (zero? @calls))))
+
+(deftest http-status-survives-a-non-json-error-body
+  (let [result (ai/call! (request (fn [_ _] {:status 503 :body "fixture-secret"})))]
+    (is (= :cognitect.anomalies/unavailable (:cognitect.anomalies/category result)))
+    (is (= 503 (:status result)))
+    (is (not (.contains (pr-str result) "fixture-secret")))))
+
+(deftest provider-error-text-is-not-exposed-in-anomalies
+  (let [result (ai/call! (request (fn [_ _]
+                                  {:status 200
+                                   :body "{\"error\":{\"message\":\"fixture-secret\"}}"})))]
+    (is (anomaly? result))
+    (is (not (.contains (pr-str result) "fixture-secret")))))
+
+(deftest programming-defects-are-not-reported-as-provider-failures
+  (is (thrown? IllegalStateException
+               (ai/call! (request (fn [_ _] (throw (IllegalStateException. "Transport bug"))))))))
+
+(deftest completion-callback-errors-do-not-trigger-a-second-outcome
+  (let [calls (atom 0)
+        req (request (fn [_ _]
+                       (completion "{\"sentiment\":\"positive\",\"confidence\":0.9}")))
+        handler (ai/make-handler (select-keys req [:provider :provider-options]))]
+    (is (thrown? IllegalStateException
+                 (handler {:event (assoc (select-keys req [:schema :input])
+                                         :call-id :callback-test
+                                         :success-event-type :done
+                                         :failure-event-type :failed)
+                           :on-complete! (fn [_]
+                                           (swap! calls inc)
+                                           (throw (IllegalStateException. "Callback bug")))})))
+    (is (= 1 @calls))))

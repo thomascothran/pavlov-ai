@@ -1,8 +1,59 @@
 # Pavlov AI
 
-Pavlov AI provides bthreads and event conventions for composing LLM-backed agents inside Pavlov behavioral programs.
+Pavlov AI calls models for schema-validated data and provides an IO handler for returning that data as Pavlov events. Agent orchestration is a separate, optional layer.
+
+## Structured model calls
+
+`ai/call!` performs one non-streaming call and returns decoded data conforming to the supplied Malli schema, or a Cognitect anomaly. JSON Schema guides the provider; local validation against the original Malli schema enforces the result, including predicates that JSON Schema cannot express.
+
+```clojure
+(require '[tech.thomascothran.pavlov.ai :as ai]
+         '[hato.client :as http])
+
+(def provider-config
+  {:provider :openai-compatible
+   :provider-options {:post! http/post
+                      :url "https://your-provider.example/chat/completions"
+                      :model "your-structured-output-model"
+                      :api-key api-key}})
+
+(ai/call! (assoc provider-config
+                 :input "Classify this review: Excellent."
+                 :schema [:map {:closed true}
+                          [:sentiment [:enum :positive :neutral :negative]]
+                          [:confidence [:double {:min 0 :max 1}]]]))
+;; => {:sentiment :positive :confidence 0.9}, or an anomaly
+```
+
+The OpenAI-compatible adapter uses `response_format` with `json_schema`; it does **not** use tools, function calls, tool-call IDs, or tool-result rounds. The provider/model must support this output format and the supplied JSON Schema. Provider restrictions can reject otherwise valid Malli schemas; those API failures return anomalies. No provider strict mode is assumed. Calls do not retry automatically.
+
+Malli vector schemas are supported. Output JSON object keys are decoded to keywords. The top-level `:cognitect.anomalies/category` key is reserved for anomalies. Connection failures, timeouts, HTTP errors, refusals, incomplete output, malformed JSON, and validation failures produce anomalies. Validation anomalies include `:explanation`. Provider/transport error text and credentials are not copied into anomalies; unexpected programming defects propagate.
+
+## Pavlov IO integration
+
+`ai/make-handler` captures provider configuration and accepts the IO callback contract:
+
+```clojure
+(def handler (ai/make-handler provider-config))
+
+(handler {:event {:type :review/classify
+                  :call-id [:review 42]
+                  :input "Classify this review: Excellent."
+                  :schema [:map [:sentiment [:enum :positive :neutral :negative]]]
+                  :success-event-type :review/classified
+                  :failure-event-type :review/classification-failed}
+          :on-complete! (fn [{:keys [event]}] (println event))})
+;; Success: {:type :review/classified :call-id [:review 42] :data {...}}
+;; Failure: {:type :review/classification-failed :call-id [:review 42] :anomaly {...}}
+```
+
+Register the handler under the request event type with `io/make-subscriber!` in a Pavlov version providing that function. The currently pinned Pavlov 4.0.272 dependency does not include the IO namespace; this handler can also be used with a caller-supplied dispatcher/callback. `call!` and the handler are synchronous; dispatch them outside the bprogram's synchronous step. The current OpenAI-compatible transport implementation is JVM-only. Handler configuration supplies credentials; request events cannot override it.
+
+## Existing agent API
 
 The main design rule is that an agent bthread should stay pure: it requests LLM/tool work as Pavlov events, and separate runtime bthreads or subscribers perform side effects and answer with configured response event types.
+
+The agent API and its tool-call normalization are legacy, separate code paths; they are not required by structured model calls.
 
 ## Development
 

@@ -35,3 +35,15 @@
     {:pre [(or (keyword? provider)
                (nil? provider))]}
     provider))
+
+(defmulti structured-output!
+  "Request structured output from PROVIDER using :input and :json-schema.
+  Return {:json output-text} or a Cognitect anomaly. Implementations own the
+  provider wire format and transport; no tool-call protocol is involved."
+  (fn [provider _options] provider))
+
+(defmethod structured-output! :default
+  [_provider _options]
+  {:cognitect.anomalies/category :cognitect.anomalies/unsupported
+   :cognitect.anomalies/message "Provider does not support structured output"
+   :kind :unsupported-provider})
