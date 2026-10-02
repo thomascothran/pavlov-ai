@@ -47,7 +47,16 @@ Malli vector schemas are supported. Output JSON object keys are decoded to keywo
 ;; Failure: {:type :review/classification-failed :call-id [:review 42] :anomaly {...}}
 ```
 
-Register the handler under the request event type with `io/make-subscriber!` in a Pavlov version providing that function. The currently pinned Pavlov 4.0.294 release JAR does not include the IO namespace; this handler can also be used with a caller-supplied dispatcher/callback. `call!` and the handler are synchronous; dispatch them outside the bprogram's synchronous step. The current OpenAI-compatible transport implementation is JVM-only. Handler configuration supplies credentials; request events cannot override it.
+The pinned Pavlov 4.0.297 release includes the IO namespace. Register the handler under the request event type:
+
+```clojure
+(require '[tech.thomascothran.pavlov.io :as io])
+
+(def model-subscriber
+  (io/make-subscriber! {:review/classify (ai/make-handler provider-config)}))
+```
+
+Attach `model-subscriber` to the bprogram's subscribers. Use `bprogram.ephemeral/make-program!` for programs waiting on external responses: `execute!` adds a deadlock detector that can terminate while IO is pending. `call!` and the handler are synchronous; the JVM IO subscriber dispatches them outside the bprogram's synchronous step by default. The current OpenAI-compatible transport implementation is JVM-only. Handler configuration supplies credentials; request events cannot override it.
 
 ## Existing agent API
 
