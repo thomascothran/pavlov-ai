@@ -1,7 +1,16 @@
 (ns tech.thomascothran.pavlov.ai.provider.openai-compatible
+  "OpenAI-compatible chat and schema-constrained model calls.
+
+  provider/call! requires :post! (Hato-shaped transport), :url, :model and
+  :schema. :api-key and :headers are optional. Supply either string :input or
+  a nonempty vector of text :messages, not both. The adapter converts :schema
+  to JSON Schema for response_format and parses the model's JSON content.
+  The provider/model must support that output format; no tool calls are used."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
-            [tech.thomascothran.pavlov.ai.provider :as provider]))
+            [tech.thomascothran.pavlov.ai.provider :as provider]
+            [tech.thomascothran.pavlov.ai.schema :as schema]
+            [tech.thomascothran.pavlov.ai.schema.malli]))
 
 (defn- authorization-headers
   [api-key]
@@ -352,7 +361,13 @@
             (seq (:tool_calls message))
             (not (string? (:content message))))
         (malformed "Provider did not return structured content")
-        :else {:json (:content message)}))))
+        :else
+        (try
+          {:data (json/read-str (:content message) :key-fn keyword)}
+          (catch Exception _
+            {:cognitect.anomalies/category :cognitect.anomalies/incorrect
+             :cognitect.anomalies/message "Model output is not valid JSON"
+             :kind :invalid-json}))))))
 
 (defn- request-messages
   [{:keys [input messages] :as options}]
@@ -372,28 +387,37 @@
         normalized))
     :else nil))
 
-(defmethod provider/structured-output! :openai-compatible
-  [_provider {:keys [post! url model json-schema] :as options}]
-  (let [messages (request-messages options)]
-  (if-not (and (ifn? post!) (string? url) (string? model) messages)
-    (failure :cognitect.anomalies/incorrect :invalid-options
-             "Structured calls require transport options and either string :input or nonempty text :messages" {})
-    (try
-      (structured-response
-       (post! url
-              (request-options
-               (assoc options :body
-                      {:model model
-                       :messages messages
-                       :response_format {:type "json_schema"
-                                         :json_schema {:name "pavlov_result"
-                                                       :schema json-schema}}}))))
-      (catch java.net.SocketTimeoutException _
-        (failure :cognitect.anomalies/interrupted :timeout
-                 "Model request timed out" {}))
-      (catch java.net.http.HttpTimeoutException _
-        (failure :cognitect.anomalies/interrupted :timeout
-                 "Model request timed out" {}))
-      (catch java.io.IOException _
-        (failure :cognitect.anomalies/unavailable :connection-failure
-                 "Model transport failed" {}))))))
+(defmethod provider/call! :openai-compatible
+  [_provider {:keys [post! url model] response-schema :schema :as options}]
+  (let [converted (try
+                    {:schema (schema/->json-schema response-schema)}
+                    (catch Exception _
+                      {:cognitect.anomalies/category :cognitect.anomalies/incorrect
+                       :cognitect.anomalies/message "Response schema cannot be converted to JSON Schema"
+                       :kind :invalid-schema}))
+        messages (request-messages options)]
+    (cond
+      (provider/anomaly? converted) converted
+      (not (and (ifn? post!) (string? url) (string? model) messages))
+      (failure :cognitect.anomalies/incorrect :invalid-options
+               "Structured calls require transport options and either string :input or nonempty text :messages" {})
+      :else
+      (try
+        (structured-response
+         (post! url
+                (request-options
+                 (assoc options :body
+                        {:model model
+                         :messages messages
+                         :response_format {:type "json_schema"
+                                           :json_schema {:name "pavlov_result"
+                                                         :schema (:schema converted)}}}))))
+        (catch java.net.SocketTimeoutException _
+          (failure :cognitect.anomalies/interrupted :timeout
+                   "Model request timed out" {}))
+        (catch java.net.http.HttpTimeoutException _
+          (failure :cognitect.anomalies/interrupted :timeout
+                   "Model request timed out" {}))
+        (catch java.io.IOException _
+          (failure :cognitect.anomalies/unavailable :connection-failure
+                   "Model transport failed" {}))))))

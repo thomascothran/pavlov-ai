@@ -1,7 +1,9 @@
 (ns tech.thomascothran.pavlov.ai.messages-test
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is]]
-            [tech.thomascothran.pavlov.ai :as ai]))
+            [tech.thomascothran.pavlov.ai :as ai]
+            [tech.thomascothran.pavlov.ai.provider :as provider]
+            [tech.thomascothran.pavlov.ai.schema :as schema]))
 
 (def history
   [{:role :system :content "Return the requested data."}
@@ -34,6 +36,27 @@
   (let [calls (atom [])]
     (is (= {:value 42} (ai/call! (assoc (fixture calls) :input "Question"))))
     (is (= [{:role "user" :content "Question"}] (:messages (first @calls))))))
+
+(deftest provider-owns-input-combination-policy
+  (doseq [input ["Question" nil]]
+    (let [calls (atom [])]
+      (with-redefs [provider/call!
+                    (fn [provider options]
+                      (swap! calls conj [provider options])
+                      {:data {:value 42}})
+                    schema/->json-schema
+                    (fn [_] (throw (ex-info "This provider does not use JSON Schema" {})))]
+        (is (= {:value 42}
+               (ai/call! {:provider ::accepts-both
+                          :schema [:map [:value :int]]
+                          :input input
+                          :messages history})))
+        (is (= 1 (count @calls)))
+        (is (= ::accepts-both (ffirst @calls)))
+        (is (= {:input input :messages history}
+               (select-keys (second (first @calls)) [:input :messages])))
+        (is (= [:map [:value :int]] (:schema (second (first @calls)))))
+        (is (not (contains? (second (first @calls)) :json-schema)))))))
 
 (deftest invalid-or-ambiguous-message-input-fails-before-http
   (doseq [input [{:input "Question" :messages history}

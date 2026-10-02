@@ -31,12 +31,12 @@
                                               :url "https://model.example/chat/completions"
                                               :model "fixture-model"}})})
             running (bp/make-program!
-                       [[:caller (b/scenario
-                                  [{:request #{request}}
-                                   {:wait-on #{:model/succeeded :model/failed}}
-                                   {:request #{{:type :done :terminal true}}}])]]
-                       {:subscribers {:model subscriber
-                                      :record (fn [event _] (swap! events conj event))}})
+                     {:caller (b/scenario
+                               [{:request #{request}}
+                                {:wait-on #{:model/succeeded :model/failed}}
+                                {:request #{{:type :done :terminal true}}}])}
+                     {:subscribers {:model subscriber
+                                    :record (fn [event _] (swap! events conj event))}})
             terminal (try (deref (proto/stopped running) 3000 ::timeout)
                           (finally (program/kill! running)))
             outcomes (filter #(#{:model/succeeded :model/failed} (:type %)) @events)

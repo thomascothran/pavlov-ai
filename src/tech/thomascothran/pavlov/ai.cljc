@@ -2,68 +2,33 @@
   (:require [tech.thomascothran.pavlov.ai.provider :as provider]
             [tech.thomascothran.pavlov.ai.schema :as schema]
             [tech.thomascothran.pavlov.ai.schema.malli]
-            #?(:clj [clojure.data.json :as json])
-            #?(:clj [tech.thomascothran.pavlov.ai.provider.openai-compatible])))
-
-(defn- anomaly
-  [kind message]
-  {:cognitect.anomalies/category :cognitect.anomalies/incorrect
-   :cognitect.anomalies/message message
-   :kind kind})
-
-(defn- read-json
-  [text]
-  #?(:clj (json/read-str text :key-fn keyword)
-     :cljs (js->clj (js/JSON.parse text) :keywordize-keys true)))
-
-(defn- decode-result
-  [response-schema text]
-  (let [parsed (try
-                 {:value (read-json text)}
-                 (catch #?(:clj Exception :cljs :default) _
-                   (anomaly :invalid-json "Model output is not valid JSON")))]
-    (if (provider/anomaly? parsed)
-      parsed
-      (let [value (schema/decode response-schema (:value parsed))]
-        (if (schema/validate response-schema value)
-          value
-          (assoc (anomaly :schema-violation "Model output does not conform to the response schema")
-                 :explanation (schema/explain response-schema value)))))))
+            #?(:clj [tech.thomascothran.pavlov.ai.provider.openai-compatible])
+            #?(:clj [tech.thomascothran.pavlov.ai.provider.openrouter-decisions])))
 
 (defn call!
-  "Perform one synchronous model call. REQUEST supplies :input (a string) or
-  :messages (ordered conversation messages), exclusively,
-  :schema (a Malli vector schema), :provider and :provider-options.
+  "Perform one synchronous model call.
 
-  Return JSON-decoded, schema-decoded and locally validated data, or a
-  Cognitect anomaly for expected provider/output failures. OpenAI-compatible
-  options require :post! (Hato-shaped transport), :url and :model; :api-key
-  and :headers are optional. No agent loop or tool calls are used.
+  REQUEST supplies :provider, :provider-options, :schema, and provider-specific
+  :input and/or :messages. The provider owns input formats, option requirements,
+  and response parsing; the schema implementation owns decoding and validation.
 
-  Schema/configuration failures are anomalies; unexpected programming defects
-  in adapters or transport are allowed to propagate. Model output must not use
-  the reserved top-level :cognitect.anomalies/category key."
+  Return schema-decoded, locally validated data or a Cognitect anomaly for
+  expected failures. Unexpected programming exceptions propagate. No conversation
+  state, retries, or agent loop are maintained. The top-level
+  :cognitect.anomalies/category key is reserved for anomalies."
   [{response-schema :schema :keys [provider provider-options] :as request}]
-  (let [converted (if (and (contains? request :input) (contains? request :messages))
-                    (anomaly :ambiguous-input "Supply either :input or :messages, not both")
-                    (try
-                    {:schema (schema/->json-schema response-schema)}
-                    (catch #?(:clj Exception :cljs :default) _
-                      (anomaly :invalid-schema "Response schema cannot be converted to JSON Schema"))))]
-    (if (provider/anomaly? converted)
-      converted
-      (let [result (provider/structured-output!
-                    provider (merge (dissoc provider-options :input :messages)
-                                    (select-keys request [:input :messages])
-                                    {:json-schema (:schema converted)}))]
-        (if (provider/anomaly? result)
-          result
-          (decode-result response-schema (:json result)))))))
+  (let [result (provider/call!
+                provider (merge (dissoc provider-options :input :messages)
+                                (select-keys request [:input :messages])
+                                {:schema response-schema}))]
+    (if (provider/anomaly? result)
+      result
+      (schema/decode-result response-schema (:data result)))))
 
 (defn make-handler
   "Create a handler for Pavlov IO's {:event ... :on-complete! ...} contract.
   CONFIG supplies :provider and :provider-options. Each request event supplies
-  :schema, either :input or :messages, :call-id, :success-event-type and
+  :schema, provider-specific :input and/or :messages, :call-id, :success-event-type and
   :failure-event-type. History is caller-owned; the handler retains no history.
 
   Calls on-complete! once with {:event outcome}, containing :call-id and either
@@ -72,7 +37,7 @@
   [config]
   (fn [{:keys [event on-complete!]}]
     (let [result (call! (merge (select-keys config [:provider :provider-options])
-                              (select-keys event [:schema :input :messages])))
+                               (select-keys event [:schema :input :messages])))
           failed? (provider/anomaly? result)]
       (on-complete!
        {:event {:type (get event (if failed? :failure-event-type :success-event-type))

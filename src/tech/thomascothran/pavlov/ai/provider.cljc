@@ -36,15 +36,17 @@
                (nil? provider))]}
     provider))
 
-(defmulti structured-output!
-  "Request structured output from PROVIDER using :input or :messages and
-  :json-schema. Providers translate supported input formats; unsupported
+(defmulti call!
+  "Perform one model call using PROVIDER with :input or :messages and
+  :schema (the original response schema). Providers own any schema conversion
+  required by their APIs and translate supported input formats; unsupported
   formats return anomalies.
-  Return {:json output-text} or a Cognitect anomaly. Implementations own the
-  provider wire format and transport; no tool-call protocol is involved."
+  Return {:data decoded-value} or a Cognitect anomaly. Implementations own
+  response parsing, provider wire format and transport; no tool-call protocol
+  is involved. The :data value may be nil or false."
   (fn [provider _options] provider))
 
-(defmethod structured-output! :default
+(defmethod call! :default
   [_provider _options]
   {:cognitect.anomalies/category :cognitect.anomalies/unsupported
    :cognitect.anomalies/message "Provider does not support structured output"

@@ -36,7 +36,7 @@
 (deftest returns-decoded-domain-data
   (is (= {:sentiment :positive :confidence 0.9}
          (ai/call! (request (fn [_ _]
-                             (completion "{\"sentiment\":\"positive\",\"confidence\":0.9}")))))))
+                              (completion "{\"sentiment\":\"positive\",\"confidence\":0.9}")))))))
 
 (deftest supports-arbitrary-schema-data-without-action-or-message-envelope
   (let [s [:vector :int]]
@@ -47,8 +47,8 @@
 (deftest requests-json-schema-output-without-tool-call-protocol
   (let [calls (atom [])]
     (ai/call! (request (fn [url options]
-                        (swap! calls conj [url options])
-                        (completion "{\"sentiment\":\"positive\",\"confidence\":0.9}"))))
+                         (swap! calls conj [url options])
+                         (completion "{\"sentiment\":\"positive\",\"confidence\":0.9}"))))
     (is (= 1 (count @calls)))
     (let [[url options] (first @calls)
           body (when (:body options)
@@ -88,13 +88,13 @@
            [:malformed-output-json (fn [_ _] (completion "not JSON"))]
            [:missing-output (fn [_ _] {:status 200 :body "{\"choices\":[]}"})]
            [:refusal (fn [_ _] {:status 200 :body (json/write-str
-                                                 {:choices [{:message {:role "assistant"
-                                                                       :refusal "Cannot comply"}
-                                                             :finish_reason "stop"}]})})]
+                                                   {:choices [{:message {:role "assistant"
+                                                                         :refusal "Cannot comply"}
+                                                               :finish_reason "stop"}]})})]
            [:incomplete (fn [_ _] {:status 200 :body (json/write-str
-                                                    {:choices [{:message {:role "assistant"
-                                                                          :content "{\"sentiment\":\"positive\",\"confidence\":0.9}"}
-                                                                :finish_reason "length"}]})})]]]
+                                                      {:choices [{:message {:role "assistant"
+                                                                            :content "{\"sentiment\":\"positive\",\"confidence\":0.9}"}
+                                                                  :finish_reason "length"}]})})]]]
     (testing (name label)
       (let [result (ai/call! (request post!))]
         (is (anomaly? result))
@@ -103,7 +103,7 @@
 (deftest unsupported-provider-is-an-anomaly-without-network-work
   (let [calls (atom 0)]
     (is (anomaly? (ai/call! (assoc (request (fn [_ _] (swap! calls inc)))
-                                  :provider ::unsupported))))
+                                   :provider ::unsupported))))
     (is (zero? @calls))))
 
 (defn run-handler
@@ -122,8 +122,8 @@
 
 (deftest io-handler-completes-once-with-correlated-validated-data
   (is (= [{:event {:type :review/classified
-                  :call-id [:review 42]
-                  :data {:sentiment :positive :confidence 0.9}}}]
+                   :call-id [:review 42]
+                   :data {:sentiment :positive :confidence 0.9}}}]
          (run-handler (fn [_ _]
                         (completion "{\"sentiment\":\"positive\",\"confidence\":0.9}"))))))
 
@@ -140,10 +140,10 @@
 
 (deftest json-values-are-not-confused-with-missing-results
   (doseq [[s content expected] [[[:maybe :string] "null" nil]
-                               [[:boolean] "false" false]
-                               [[:map [:labels [:set :keyword]]]
-                                "{\"labels\":[\"urgent\",\"boss\"]}"
-                                {:labels #{:urgent :boss}}]]]
+                                [[:boolean] "false" false]
+                                [[:map [:labels [:set :keyword]]]
+                                 "{\"labels\":[\"urgent\",\"boss\"]}"
+                                 {:labels #{:urgent :boss}}]]]
     (is (= expected
            (ai/call! (assoc (request (fn [_ _] (completion content))) :schema s))))))
 
@@ -163,8 +163,8 @@
 
 (deftest provider-error-text-is-not-exposed-in-anomalies
   (let [result (ai/call! (request (fn [_ _]
-                                  {:status 200
-                                   :body "{\"error\":{\"message\":\"fixture-secret\"}}"})))]
+                                    {:status 200
+                                     :body "{\"error\":{\"message\":\"fixture-secret\"}}"})))]
     (is (anomaly? result))
     (is (not (.contains (pr-str result) "fixture-secret")))))
 
