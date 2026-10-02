@@ -37,7 +37,9 @@
     provider))
 
 (defmulti structured-output!
-  "Request structured output from PROVIDER using :input and :json-schema.
+  "Request structured output from PROVIDER using :input or :messages and
+  :json-schema. Providers translate supported input formats; unsupported
+  formats return anomalies.
   Return {:json output-text} or a Cognitect anomaly. Implementations own the
   provider wire format and transport; no tool-call protocol is involved."
   (fn [provider _options] provider))

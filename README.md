@@ -27,6 +27,19 @@ Pavlov AI calls models for schema-validated data and provides an IO handler for 
 
 The OpenAI-compatible adapter uses `response_format` with `json_schema`; it does **not** use tools, function calls, tool-call IDs, or tool-result rounds. The provider/model must support this output format and the supplied JSON Schema. Provider restrictions can reject otherwise valid Malli schemas; those API failures return anomalies. No provider strict mode is assumed. Calls do not retry automatically.
 
+Supply `:messages` instead of `:input` to include instructions and conversation history:
+
+```clojure
+(ai/call! (assoc provider-config
+                 :schema [:map [:sentiment [:enum :positive :neutral :negative]]]
+                 :messages [{:role :system :content "Classify reviews consistently."}
+                            {:role :user :content "Earlier review"}
+                            {:role :assistant :content "{\"sentiment\":\"neutral\"}"}
+                            {:role :user :content "Excellent."}]))
+```
+
+Messages are a nonempty vector of text messages, in caller-supplied order. Roles may be keywords or strings: system, developer, user, or assistant. The selected provider/model must support those roles. `:input` is shorthand for one user message; supplying both keys is an anomaly, even if one is nil. Request events accepted by `make-handler` support the same alternatives. Calls and handlers retain no conversation state and add no agent loop.
+
 Malli vector schemas are supported. Output JSON object keys are decoded to keywords. The top-level `:cognitect.anomalies/category` key is reserved for anomalies. Connection failures, timeouts, HTTP errors, refusals, incomplete output, malformed JSON, and validation failures produce anomalies. Validation anomalies include `:explanation`. Provider/transport error text and credentials are not copied into anomalies; unexpected programming defects propagate.
 
 ## Pavlov IO integration

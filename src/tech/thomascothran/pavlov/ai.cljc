@@ -31,7 +31,8 @@
                  :explanation (schema/explain response-schema value)))))))
 
 (defn call!
-  "Perform one synchronous model call. REQUEST supplies :input (a string),
+  "Perform one synchronous model call. REQUEST supplies :input (a string) or
+  :messages (ordered conversation messages), exclusively,
   :schema (a Malli vector schema), :provider and :provider-options.
 
   Return JSON-decoded, schema-decoded and locally validated data, or a
@@ -42,16 +43,19 @@
   Schema/configuration failures are anomalies; unexpected programming defects
   in adapters or transport are allowed to propagate. Model output must not use
   the reserved top-level :cognitect.anomalies/category key."
-  [{response-schema :schema :keys [provider input provider-options]}]
-  (let [converted (try
+  [{response-schema :schema :keys [provider provider-options] :as request}]
+  (let [converted (if (and (contains? request :input) (contains? request :messages))
+                    (anomaly :ambiguous-input "Supply either :input or :messages, not both")
+                    (try
                     {:schema (schema/->json-schema response-schema)}
                     (catch #?(:clj Exception :cljs :default) _
-                      (anomaly :invalid-schema "Response schema cannot be converted to JSON Schema")))]
+                      (anomaly :invalid-schema "Response schema cannot be converted to JSON Schema"))))]
     (if (provider/anomaly? converted)
       converted
       (let [result (provider/structured-output!
-                    provider (assoc provider-options
-                                    :input input :json-schema (:schema converted)))]
+                    provider (merge (dissoc provider-options :input :messages)
+                                    (select-keys request [:input :messages])
+                                    {:json-schema (:schema converted)}))]
         (if (provider/anomaly? result)
           result
           (decode-result response-schema (:json result)))))))
@@ -59,7 +63,8 @@
 (defn make-handler
   "Create a handler for Pavlov IO's {:event ... :on-complete! ...} contract.
   CONFIG supplies :provider and :provider-options. Each request event supplies
-  :schema, :input, :call-id, :success-event-type and :failure-event-type.
+  :schema, either :input or :messages, :call-id, :success-event-type and
+  :failure-event-type. History is caller-owned; the handler retains no history.
 
   Calls on-complete! once with {:event outcome}, containing :call-id and either
   :data or :anomaly. Dispatch blocking calls outside the bprogram step (the
@@ -67,7 +72,7 @@
   [config]
   (fn [{:keys [event on-complete!]}]
     (let [result (call! (merge (select-keys config [:provider :provider-options])
-                              (select-keys event [:schema :input])))
+                              (select-keys event [:schema :input :messages])))
           failed? (provider/anomaly? result)]
       (on-complete!
        {:event {:type (get event (if failed? :failure-event-type :success-event-type))

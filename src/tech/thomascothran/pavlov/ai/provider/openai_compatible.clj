@@ -354,18 +354,37 @@
         (malformed "Provider did not return structured content")
         :else {:json (:content message)}))))
 
+(defn- request-messages
+  [{:keys [input messages] :as options}]
+  (cond
+    (and (contains? options :input) (contains? options :messages)) nil
+    (contains? options :input)
+    (when (string? input) [{:role "user" :content input}])
+    (and (vector? messages) (seq messages))
+    (let [normalized (mapv (fn [message]
+                             (update message :role
+                                     #(if (keyword? %) (name %) %)))
+                           (filter map? messages))]
+      (when (and (= (count normalized) (count messages))
+                 (every? #(and (#{"system" "developer" "user" "assistant"} (:role %))
+                               (string? (:content %))
+                               (not (contains? % :tool_calls))) normalized))
+        normalized))
+    :else nil))
+
 (defmethod provider/structured-output! :openai-compatible
-  [_provider {:keys [post! url model input json-schema] :as options}]
-  (if-not (and (ifn? post!) (string? url) (string? model) (string? input))
+  [_provider {:keys [post! url model json-schema] :as options}]
+  (let [messages (request-messages options)]
+  (if-not (and (ifn? post!) (string? url) (string? model) messages)
     (failure :cognitect.anomalies/incorrect :invalid-options
-             "Structured calls require :post!, :url, :model and string :input" {})
+             "Structured calls require transport options and either string :input or nonempty text :messages" {})
     (try
       (structured-response
        (post! url
               (request-options
                (assoc options :body
                       {:model model
-                       :messages [{:role "user" :content input}]
+                       :messages messages
                        :response_format {:type "json_schema"
                                          :json_schema {:name "pavlov_result"
                                                        :schema json-schema}}}))))
@@ -377,4 +396,4 @@
                  "Model request timed out" {}))
       (catch java.io.IOException _
         (failure :cognitect.anomalies/unavailable :connection-failure
-                 "Model transport failed" {})))))
+                 "Model transport failed" {}))))))
