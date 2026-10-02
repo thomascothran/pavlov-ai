@@ -44,6 +44,43 @@ Malli vector schemas are supported. Output JSON object keys are decoded to keywo
 
 ## Pavlov IO integration
 
+### Jev on OpenRouter
+
+Use `:openrouter-decisions` for [OpenRouter's native Jev Decisions API](https://openrouter.ai/blog/insights/what-is-jev/). It accepts structured `:input` containing `:state` (text, an object, or an array) and a nonempty `:questions` map. Each question has `:type` and `:instructions`; choice questions supply a criteria map of option descriptions, score questions supply an ordered vector of level descriptions, and noul questions ask for a yes/no probability. Question types accept strings or keywords.
+
+```clojure
+(def decision-config
+  {:provider :openrouter-decisions
+   :provider-options {:post! http/post
+                      :model "typesafe/jev-1.13"
+                      :api-key api-key}})
+
+(def decision-request
+  {:type :decision/requested
+   :call-id [:ticket 42]
+   :input {:state {:ticket "I was charged twice."}
+           :questions {:refund {:type :noul
+                                :instructions "Is the customer asking for money back?"}}}
+   :schema [:map
+            [:refund [:map
+                      [:type [:= "noul"]]
+                      [:noul [:double {:min 0 :max 1}]]]]]
+   :success-event-type :decision/completed
+   :failure-event-type :decision/failed})
+
+(ai/call! (merge decision-config (select-keys decision-request [:input :schema])))
+;; => {:refund {:type "noul" :noul 0.99}}, or an anomaly
+
+(def decision-subscriber
+  (io/make-subscriber! {:decision/requested (ai/make-handler decision-config)}))
+```
+
+Require `tech.thomascothran.pavlov.io` as `io` for the subscriber example. The default endpoint is `https://openrouter.ai/api/alpha/decisions`; `:url` and extra `:headers` may be configured. Transport is injected with the same Hato-shaped `:post!` used by the chat adapter. Conversation `:messages` are not accepted by this provider.
+
+Jev's questions determine its output shape. The Malli schema validates the returned **answers map**, including choice labels, probabilities, and confidence where applicable; it is not sent to Jev as JSON Schema. Usage, IDs, and provider metadata are excluded from the result. A Malli enum of keywords can decode choice labels into keywords, just as for LLM results. There is no chat-completion envelope, tool protocol, automatic thresholding, or agent loop. The adapter is JVM-only and uses the shared data-or-anomaly and IO event contracts.
+
+### Chat models
+
 `ai/make-handler` captures provider configuration and accepts the IO callback contract:
 
 ```clojure
