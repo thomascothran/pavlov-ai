@@ -3,7 +3,8 @@
             [tech.thomascothran.pavlov.ai.schema :as schema]
             [tech.thomascothran.pavlov.ai.schema.malli]
             #?(:clj [clojure.data.json :as json])
-            #?(:clj [tech.thomascothran.pavlov.ai.provider.openai-compatible])))
+            #?(:clj [tech.thomascothran.pavlov.ai.provider.openai-compatible])
+            #?(:clj [tech.thomascothran.pavlov.ai.provider.openrouter-decisions])))
 
 (defn- anomaly
   [kind message]
@@ -31,7 +32,7 @@
                  :explanation (schema/explain response-schema value)))))))
 
 (defn call!
-  "Perform one synchronous model call. REQUEST supplies :input (a string) or
+  "Perform one synchronous model call. REQUEST supplies provider-specific :input or
   :messages (ordered conversation messages), exclusively,
   :schema (a Malli vector schema), :provider and :provider-options.
 
@@ -39,6 +40,10 @@
   Cognitect anomaly for expected provider/output failures. OpenAI-compatible
   options require :post! (Hato-shaped transport), :url and :model; :api-key
   and :headers are optional. No agent loop or tool calls are used.
+
+  OpenRouter Decisions takes :input {:state ... :questions ...}; its response
+  schema validates the answers map. Options require :post! and :model, with
+  optional :url, :api-key and :headers. Chat input remains a string.
 
   Schema/configuration failures are anomalies; unexpected programming defects
   in adapters or transport are allowed to propagate. Model output must not use
