@@ -12,6 +12,8 @@ in
     pkgs.git
   ];
 
+  processes.clj.exec = "clj -A:dev:test -X dev/go!";
+
   scripts.clj-test.exec = ''
     clj -X:test
   '';

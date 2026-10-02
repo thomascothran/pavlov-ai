@@ -131,3 +131,15 @@ The agent emits an LLM call request that declares response event **types**, not 
 ```
 
 A runtime bridge performs the side effect and then requests an event of the declared success or failure type, including the relevant correlation fields such as `:call-id` and `:conversation-id`.
+
+## Development nREPL
+
+Run `devenv up` to start the `clj` process, or start it directly with
+`clojure -X:dev:test dev/go!`. The server binds only to `127.0.0.1`, chooses
+an available port, and writes it to `.nrepl-port` for editor/client discovery.
+This lets separate worktrees run servers without port collisions.
+For a fixed port, use `clojure -X:dev:test dev/go! :port 9898`.
+
+From an existing REPL, `(dev/start-nrepl!)` starts the server and
+`(dev/stop-nrepl!)` stops it. Shutdown removes its port file.
+Connect with `clj-nrepl-eval -p "$(< .nrepl-port)"`.
