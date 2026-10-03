@@ -18,6 +18,12 @@ in
     clj -X:test
   '';
 
+  scripts.deploy.exec = ''
+    clj -X:test
+    clj -T:build ci
+    env $(cat ~/.secrets/.clojars | xargs) clj -T:build deploy
+  '';
+
   scripts.test-watch.exec = ''
     clj -X:test :watch? true
   '';
