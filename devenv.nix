@@ -9,6 +9,7 @@ in
   languages.clojure.enable = true;
 
   packages = [
+    pkgs.babashka
     pkgs.git
   ];
 
