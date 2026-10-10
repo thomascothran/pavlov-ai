@@ -3,6 +3,11 @@
         metosin/malli {:mvn/version "0.20.1"}
         org.clojure/data.json {:mvn/version "2.5.2"}
         hato/hato {:mvn/version "1.0.0"}}
+ ;; Google's Maven Central mirror first, Maven Central itself as a fallback.
+ ;; Maven Central rate-limits (HTTP 429) shared egress IPs such as cloud CI
+ ;; and sandboxes. "central" is the repo tools.deps tries first.
+ :mvn/repos {"central" {:url "https://maven-central.storage-download.googleapis.com/maven2/"}
+             "maven-central" {:url "https://repo1.maven.org/maven2/"}}
  :aliases
  {:dev {:extra-paths ["dev"]
         :extra-deps {nrepl/nrepl {:mvn/version "1.2.0"}}}
