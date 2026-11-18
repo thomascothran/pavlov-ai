@@ -42,6 +42,41 @@ For the OpenAI-compatible adapter, messages are a nonempty vector of text messag
 
 Malli vector schemas are supported. Output JSON object keys are decoded to keywords. The top-level `:cognitect.anomalies/category` key is reserved for anomalies. Connection failures, timeouts, HTTP errors, refusals, incomplete output, malformed JSON, and validation failures produce anomalies. Validation anomalies include `:explanation`. Provider/transport error text and credentials are not copied into anomalies; unexpected programming defects propagate.
 
+## Claude subscription via the Claude CLI (`:claude-cli`)
+
+`:claude-cli` makes the same structured calls through the locally installed Claude Code CLI (`claude -p`), using the logged-in Claude subscription. It needs no API key and never passes `--bare` (which requires one). `:input`, `:messages`, `:schema`, results and anomalies work as for `:openai-compatible`, so bthreads and handlers do not change when you switch providers:
+
+```clojure
+(require '[tech.thomascothran.pavlov.ai.provider.claude-cli :as claude-cli])
+
+(def claude-config
+  {:provider :claude-cli
+   :provider-options {:run! claude-cli/run-process
+                      :model "sonnet"
+                      :effort "low"
+                      :timeout-ms 120000}})
+
+(ai/call! (assoc claude-config
+                 :input "Classify this review: Excellent."
+                 :schema [:map [:sentiment [:enum :positive :neutral :negative]]]))
+```
+
+Options:
+
+- `:run!` (required): process transport, analogous to `:post!`. It receives `{:command [...] :stdin "..." :dir ... :timeout-ms ...}` and returns `{:exit :out :err}`. It should throw `TimeoutException` on timeout and `IOException` when the process cannot start. `claude-cli/run-process` is a ready-made `ProcessBuilder` implementation that kills the process tree on timeout.
+- `:model` (required): a model name or alias such as `"sonnet"` or `"haiku"`.
+- `:effort` (required): `low`, `medium`, `high`, `xhigh` or `max`, as a string or keyword.
+- `:tools`: a vector of built-in tool names, e.g. `["Read" "Grep"]`. Default: none. Configured tools are also pre-approved, because `-p` mode has no interactive approval.
+- `:dir`: working directory. Default `nil`: the CLI inherits the JVM's working directory. It is never created.
+- `:executable`: path to the CLI. Default `"claude"`.
+- `:timeout-ms`: passed to `:run!`.
+
+Each call is a fresh, isolated CLI process: no session (`--no-session-persistence`), no tools by default, no MCP servers (`--strict-mcp-config`), no settings, `CLAUDE.md` or slash commands (`--setting-sources ""`, `--disable-slash-commands`), and Claude Code's default system prompt replaced. History stays caller-owned. Leading system/developer messages become the system prompt; all remaining messages are sent in order as one user message with one XML-escaped `<turn role="...">` block per message. The schema is passed with `--json-schema` and read from the result's structured output.
+
+Caching: the CLI uses prompt caching, so repeated calls with the same model, effort, schema, system prompt and growing history read the earlier prefix from cache. The working directory is part of that cached prefix: calls from different directories miss the cache. Within one JVM this holds automatically; set `:dir` to share the cache across processes started from different directories. With `:tools` enabled, tools act on the working directory, so set `:dir` to keep them away from the project's files.
+
+The adapter is JVM-only and supports `ai/call!` and `ai/make-handler` only; the CLI's tools are its own, not Pavlov actions, so there is no agent loop. CLI and provider error text is not copied into anomalies. `dev/pavlov_ai/claude_cli.clj` runs the task-urgency bthread from `dev/pavlov_ai/llm.clj` against the CLI.
+
 ## Jev: decisions instead of chat
 
 [Jev on OpenRouter](https://openrouter.ai/blog/insights/what-is-jev/) answers specific questions about supplied information. Think of it as asking “which category fits?” or “how likely is yes?” rather than asking a chat model to write a reply.
