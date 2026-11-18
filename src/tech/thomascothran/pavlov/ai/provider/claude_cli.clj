@@ -32,55 +32,21 @@
   Returns {:data structured-output} or a Cognitect anomaly. CLI and provider
   error text is never copied into anomalies."
   (:require [clojure.data.json :as json]
-            [clojure.java.io :as io]
             [clojure.string :as str]
             [tech.thomascothran.pavlov.ai.provider :as provider]
+            [tech.thomascothran.pavlov.ai.provider.process :as process]
             [tech.thomascothran.pavlov.ai.schema :as schema]
             [tech.thomascothran.pavlov.ai.schema.malli])
   (:import (java.io IOException)
-           (java.lang ProcessHandle)
-           (java.util.concurrent TimeUnit TimeoutException)))
+           (java.util.concurrent TimeoutException)))
 
 ;; ---------------------------------------------------------------------------
 ;; Default process runner
 
-(defn- destroy-tree!
-  [^Process process]
-  (doseq [^ProcessHandle child (iterator-seq (.iterator (.descendants process)))]
-    (.destroyForcibly child))
-  (.destroyForcibly process))
-
-(defn run-process
-  "Default :run! for the :claude-cli provider, built on ProcessBuilder.
-
-  Starts COMMAND in DIR (or the JVM's working directory when DIR is nil),
-  writes STDIN as UTF-8 and waits up to TIMEOUT-MS (forever when nil).
-  Returns {:exit :out :err}. Throws TimeoutException after killing the process
-  tree on timeout, and IOException when the process cannot be started."
-  [{:keys [command stdin dir timeout-ms]}]
-  (let [builder (ProcessBuilder. ^java.util.List (vec command))
-        _ (when dir (.directory builder (io/file dir)))
-        process (.start builder)
-        out (future (slurp (.getInputStream process) :encoding "UTF-8"))
-        err (future (slurp (.getErrorStream process) :encoding "UTF-8"))
-        completed? (volatile! false)]
-    (try
-      (try
-        (with-open [writer (io/writer (.getOutputStream process) :encoding "UTF-8")]
-          (.write writer (str stdin)))
-        (catch IOException _
-          ;; The process exited without reading stdin; its exit status and
-          ;; output describe the failure.
-          nil))
-      (when-not (if timeout-ms
-                  (.waitFor process (long timeout-ms) TimeUnit/MILLISECONDS)
-                  (do (.waitFor process) true))
-        (throw (TimeoutException. "Process timed out")))
-      (vreset! completed? true)
-      {:exit (.exitValue process) :out @out :err @err}
-      (finally
-        (when-not @completed?
-          (destroy-tree! process))))))
+(def run-process
+  "Default :run! for the :claude-cli provider. Alias of
+  `tech.thomascothran.pavlov.ai.provider.process/run-process`."
+  process/run-process)
 
 ;; ---------------------------------------------------------------------------
 ;; Request

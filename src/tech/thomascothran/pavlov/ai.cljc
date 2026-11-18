@@ -5,7 +5,8 @@
             #?(:clj [tech.thomascothran.pavlov.ai.provider.openai-compatible])
             #?(:clj [tech.thomascothran.pavlov.ai.provider.openrouter-decisions])
             #?(:clj [tech.thomascothran.pavlov.ai.provider.typesafe-decisions])
-            #?(:clj [tech.thomascothran.pavlov.ai.provider.claude-cli])))
+            #?(:clj [tech.thomascothran.pavlov.ai.provider.claude-cli])
+            #?(:clj [tech.thomascothran.pavlov.ai.provider.pi-cli])))
 
 (defn call!
   "Perform one synchronous model call.

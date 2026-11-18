@@ -4,6 +4,7 @@
             [clojure.test :refer [deftest is testing]]
             [tech.thomascothran.pavlov.ai :as ai]
             [tech.thomascothran.pavlov.ai.provider.claude-cli :as claude-cli]
+            [tech.thomascothran.pavlov.ai.provider.process :as process]
             [tech.thomascothran.pavlov.ai.schema :as schema]))
 
 (def reply-schema [:map {:closed true} [:reply :string]])
@@ -248,24 +249,8 @@
         (is (= expected (category result)))
         (is (not (str/includes? (pr-str result) "fixture-secret")))))))
 
-(deftest run-process-pipes-stdin-and-captures-output
-  (is (= {:exit 0 :out "héllo\n" :err ""}
-         (claude-cli/run-process {:command ["cat"] :stdin "héllo\n"})))
-  (is (= 3 (:exit (claude-cli/run-process {:command ["sh" "-c" "echo oops >&2; exit 3"]
-                                           :stdin ""})))))
-
-(deftest run-process-uses-dir-only-when-given
-  (let [tmp (System/getProperty "java.io.tmpdir")]
-    (is (= (str (.getCanonicalFile (java.io.File. tmp)))
-           (str/trim (:out (claude-cli/run-process {:command ["pwd" "-P"] :stdin "" :dir tmp}))))))
-  (is (= (str (.getCanonicalFile (java.io.File. (System/getProperty "user.dir"))))
-         (str/trim (:out (claude-cli/run-process {:command ["pwd" "-P"] :stdin ""}))))))
-
-(deftest run-process-times-out-and-reports-missing-binaries
-  (is (thrown? java.util.concurrent.TimeoutException
-               (claude-cli/run-process {:command ["sleep" "5"] :stdin "" :timeout-ms 100})))
-  (is (thrown? java.io.IOException
-               (claude-cli/run-process {:command ["pavlov-no-such-binary"] :stdin ""}))))
+(deftest run-process-is-the-shared-runner
+  (is (identical? process/run-process claude-cli/run-process)))
 
 (deftest configured-tools-are-enabled-and-allowed
   (let [calls (atom [])

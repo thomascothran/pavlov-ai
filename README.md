@@ -63,7 +63,7 @@ Malli vector schemas are supported. Output JSON object keys are decoded to keywo
 
 Options:
 
-- `:run!` (required): process transport, analogous to `:post!`. It receives `{:command [...] :stdin "..." :dir ... :timeout-ms ...}` and returns `{:exit :out :err}`. It should throw `TimeoutException` on timeout and `IOException` when the process cannot start. `claude-cli/run-process` is a ready-made `ProcessBuilder` implementation that kills the process tree on timeout.
+- `:run!` (required): process transport, analogous to `:post!`. It receives `{:command [...] :stdin "..." :dir ... :timeout-ms ...}` and returns `{:exit :out :err}`. It should throw `TimeoutException` on timeout and `IOException` when the process cannot start. `process/run-process` (`tech.thomascothran.pavlov.ai.provider.process`, also available as `claude-cli/run-process`) is a ready-made `ProcessBuilder` implementation that kills the process tree on timeout.
 - `:model` (required): a model name or alias such as `"sonnet"` or `"haiku"`.
 - `:effort` (required): `low`, `medium`, `high`, `xhigh` or `max`, as a string or keyword.
 - `:tools`: a vector of built-in tool names, e.g. `["Read" "Grep"]`. Default: none. Configured tools are also pre-approved, because `-p` mode has no interactive approval.
@@ -76,6 +76,48 @@ Each call is a fresh, isolated CLI process: no session (`--no-session-persistenc
 Caching: the CLI uses prompt caching, so repeated calls with the same model, effort, schema, system prompt and growing history read the earlier prefix from cache. The working directory is part of that cached prefix: calls from different directories miss the cache. Within one JVM this holds automatically; set `:dir` to share the cache across processes started from different directories. With `:tools` enabled, tools act on the working directory, so set `:dir` to keep them away from the project's files.
 
 The adapter is JVM-only and supports `ai/call!` and `ai/make-handler` only; the CLI's tools are its own, not Pavlov actions, so there is no agent loop. CLI and provider error text is not copied into anomalies. `dev/pavlov_ai/claude_cli.clj` runs the task-urgency bthread from `dev/pavlov_ai/llm.clj` against the CLI.
+
+## Any model pi is logged in to via the pi CLI (`:pi-cli`)
+
+`:pi-cli` makes the same structured calls through the locally installed [pi](https://github.com/earendil-works/pi) coding agent CLI (`pi -p`). pi can reach several model providers; authentication is pi's concern, and Pavlov AI passes no credentials or API keys. `:input`, `:messages`, `:schema`, results and anomalies work as for `:openai-compatible`, so bthreads and handlers do not change when you switch providers:
+
+```clojure
+(require '[tech.thomascothran.pavlov.ai.provider.process :as process])
+
+(def pi-config
+  {:provider :pi-cli
+   :provider-options {:run! process/run-process
+                      :model-provider "openai-codex"
+                      :model "gpt-6-luna"
+                      :effort "low"
+                      :timeout-ms 120000}})
+
+(ai/call! (assoc pi-config
+                 :input "Classify this review: Excellent."
+                 :schema [:map [:sentiment [:enum :positive :neutral :negative]]]))
+```
+
+Options:
+
+- `:run!` (required): process transport, with the same contract as for `:claude-cli`. `process/run-process` is a ready-made implementation.
+- `:model-provider` (required): the pi provider, passed as `--provider`, e.g. `"openai-codex"` or `"openrouter"`. (`:provider` is already the Pavlov AI provider keyword.)
+- `:model` (required): the model id, passed as `--model`.
+- `:effort` (required): the thinking level, passed as `--thinking`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`, as a string or keyword.
+- `:tools`: a vector of tool names, e.g. `["read" "grep"]`. Default: none (`--no-tools`). `+name`/`-name` entries are rejected, because they would keep pi's default tools.
+- `:dir`: working directory. Default `nil`: the CLI inherits the JVM's working directory. It is never created.
+- `:executable`: path to the CLI. Default `"pi"`.
+- `:timeout-ms`: passed to `:run!`.
+- `:cache-key`: a string that sets the prompt-cache key (see Caching).
+
+Each call is a fresh, isolated CLI process. No session is saved (`--no-session`). Tools are off by default. Extensions, skills, prompt templates, themes, context files (`AGENTS.md` and the like), MCP servers and project-local trust-gated files are all off. pi runs `--offline` and its default system prompt is replaced. History stays caller-owned. Leading system/developer messages become the system prompt, followed by transcript instructions and the response JSON Schema. All remaining messages are sent on stdin, in order, as XML-escaped `<turn role="...">` blocks.
+
+Structured output is enforced by the prompt only. pi has no schema flag, so the system prompt asks for exactly one JSON value matching the schema, and `ai/call!` validates the reply with Malli. A reply wrapped in a single Markdown code fence is unwrapped. Anything else that is not exactly one JSON value is a `:malformed-response` anomaly.
+
+pi exits 0 even when the provider fails. The adapter reads the last assistant message from pi's JSON events. A provider error, an aborted response or a truncated (`length`) response becomes an anomaly.
+
+Caching: pi sends its session id to the provider as the prompt-cache key. A random id per process would mean no cache hits, so the adapter passes a deterministic `--session-id` derived from `:model-provider`, `:model` and the full system prompt (including the schema). Nothing is stored under that id. Calls that share a system prompt therefore share a cache key, and growing history reads the earlier prefix from cache. Set `:cache-key` to choose the key yourself, e.g. to spread heavy parallel traffic, since providers route each key to a limited number of servers. pi puts the working directory in the system prompt, so the same `:dir` advice applies as for `:claude-cli`.
+
+The adapter is JVM-only and supports `ai/call!` and `ai/make-handler` only. pi's tools are its own, not Pavlov actions, so there is no agent loop. CLI and provider error text is not copied into anomalies. `dev/pavlov_ai/pi_cli.clj` runs the task-urgency bthread from `dev/pavlov_ai/llm.clj` through pi.
 
 ## Jev: decisions instead of chat
 
