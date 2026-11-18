@@ -119,6 +119,19 @@ Caching: pi sends its session id to the provider as the prompt-cache key. A rand
 
 The adapter is JVM-only and supports `ai/call!` and `ai/make-handler` only. pi's tools are its own, not Pavlov actions, so there is no agent loop. CLI and provider error text is not copied into anomalies. `dev/pavlov_ai/pi_cli.clj` runs the task-urgency bthread from `dev/pavlov_ai/llm.clj` through pi.
 
+### ChatGPT subscription models
+
+To use ChatGPT-plan models, log pi in to its `openai-codex` provider (`/login` in pi) and set `:model-provider "openai-codex"`, as in the example above. pi handles the ChatGPT sign-in, and Pavlov AI passes no credentials. Choose the model with `:model`; `pi --list-models openai-codex` shows the available ids. OpenAI's Sign in with ChatGPT terms allow plan usage for personal and open-source projects that run locally. Paid or hosted apps need OpenAI's approval, so check the current terms before shipping.
+
+There is deliberately no `:codex-cli` provider. Codex CLI 0.160 (`codex exec` and `codex app-server`) was evaluated and rejected because it cannot make an isolated model call:
+
+- The global `~/.codex/AGENTS.md` is always added to the prompt. `project_doc_max_bytes=0` and `--ignore-user-config` do not remove it.
+- Every ChatGPT model is catalogued as code-mode only, so agent tools such as `exec`, `wait` and `request_user_input_async` are always offered, and the model sometimes calls them.
+- Each call is a new thread, and new threads got no prompt-cache hits, even for identical prompts.
+- Each call costs about 2,700–6,300 input tokens, against about 140 through pi.
+
+Codex does enforce `--output-schema` through the API, which pi cannot do. Through pi, the schema is only in the prompt, and Malli validation in `ai/call!` catches replies that do not match.
+
 ## Jev: decisions instead of chat
 
 [Jev on OpenRouter](https://openrouter.ai/blog/insights/what-is-jev/) answers specific questions about supplied information. Think of it as asking “which category fits?” or “how likely is yes?” rather than asking a chat model to write a reply.
