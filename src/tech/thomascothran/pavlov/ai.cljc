@@ -3,7 +3,8 @@
             [tech.thomascothran.pavlov.ai.schema :as schema]
             [tech.thomascothran.pavlov.ai.schema.malli]
             #?(:clj [tech.thomascothran.pavlov.ai.provider.openai-compatible])
-            #?(:clj [tech.thomascothran.pavlov.ai.provider.openrouter-decisions])))
+            #?(:clj [tech.thomascothran.pavlov.ai.provider.openrouter-decisions])
+            #?(:clj [tech.thomascothran.pavlov.ai.provider.typesafe-decisions])))
 
 (defn call!
   "Perform one synchronous model call.

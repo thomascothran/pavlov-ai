@@ -148,6 +148,28 @@ You can include all three question types in one `:questions` map to assess the s
 
 The adapter is JVM-only. It uses OpenRouter's native Decisions endpoint, not chat completions or tool calls, and does not accept conversation `:messages`. The default endpoint is `https://openrouter.ai/api/alpha/decisions`; `:url` and extra `:headers` may be configured. Transport uses the same Hato-shaped `:post!` as the chat adapter.
 
+### Calling TypeSafe directly (`:typesafe-decisions`)
+
+To call Jev's vendor API directly instead of through OpenRouter, use `:typesafe-decisions` with a TypeSafe API key and a native model ID such as `"jev-latest"`:
+
+```clojure
+(def typesafe-config
+  {:provider :typesafe-decisions
+   :provider-options {:post! http/post
+                      :model "jev-latest"
+                      :api-key typesafe-api-key}})
+
+(ai/call! (assoc typesafe-config :input refund-input :schema refund-schema))
+```
+
+`:input`, `:schema`, results, and anomalies work the same way as in the examples above. The adapter is separate from `:openrouter-decisions` and follows TypeSafe's own rules:
+
+- `:instructions` is optional, except that a `:noul` question needs `:instructions` or `:criteria`.
+- `:score` accepts 1–10 levels, and `:choice` accepts 1–255 options.
+- `:noul` may take optional `:criteria` describing each outcome, e.g. `{true "Needs action today" false "Can wait"}`.
+
+The default endpoint is `https://api.typesafe.ai/v1/systemone`; `:url` and extra `:headers` may be configured. TypeSafe's opt-in headers, such as `TypeSafe-Danger-Zone-Long-Context`, are passed through `:headers`. Image `assets` and `box` questions are not yet supported. Error bodies (`{"detail": ...}`) are not copied into anomalies.
+
 ## Pavlov IO integration
 
 ### Jev decisions as events
