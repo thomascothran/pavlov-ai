@@ -32,6 +32,7 @@ This example has Jev triage an email as a sales pitch, something to deal with la
             [tech.thomascothran.pavlov.bthread :as b]
             [tech.thomascothran.pavlov.bprogram.ephemeral :as bp]
             [tech.thomascothran.pavlov.bprogram.proto :as proto]
+            [tech.thomascothran.pavlov.event :as event]
             [tech.thomascothran.pavlov.io :as io]))
 
 (def email
@@ -77,7 +78,7 @@ This example has Jev triage an email as a sales pitch, something to deal with la
     {:wait-on #{:email/decline-drafted :email/decline-failed}}
 
     (fn [{:keys [event]}]
-      (if (= :email/decline-drafted (:type event))
+      (if (= :email/decline-drafted (event/type event))
         {:bid {:request #{{:type :email/send!
                            :to "dana@cloudsaver.example"
                            :subject (get-in event [:data :subject])
