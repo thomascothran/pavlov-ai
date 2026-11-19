@@ -1,13 +1,14 @@
 (ns tech.thomascothran.pavlov.ai.provider.openai-compatible
   "OpenAI-compatible chat and schema-constrained model calls.
 
-  provider/call! requires :post! (Hato-shaped transport), :url, :model and
-  :schema. :api-key and :headers are optional. Supply either string :input or
+  provider/call! requires :url, :model and :schema. :post! (Hato-shaped
+  transport, default hato.client/post), :api-key and :headers are optional. Supply either string :input or
   a nonempty vector of text :messages, not both. The adapter converts :schema
   to JSON Schema for response_format and parses the model's JSON content.
   The provider/model must support that output format; no tool calls are used."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
+            [hato.client :as http]
             [tech.thomascothran.pavlov.ai.provider :as provider]
             [tech.thomascothran.pavlov.ai.schema :as schema]
             [tech.thomascothran.pavlov.ai.schema.malli]))
@@ -32,7 +33,7 @@
     body))
 
 (defmethod provider/chat-completion! :openai-compatible
-  [_provider {:keys [post! url body] :as options}]
+  [_provider {:keys [post! url body] :or {post! http/post} :as options}]
   {:pre [(fn? post!)
          (string? url)
          (map? body)]}
@@ -308,16 +309,13 @@
     (normalize-success body)))
 
 (comment
-  (require '[hato.client :as http])
-
   (def openrouter-api-key
     (delay (read-line)))
 
   (def r
     (provider/chat-completion!
      :openai-compatible
-     {:post! http/post
-      :url "https://openrouter.ai/api/v1/chat/completions"
+     {:url "https://openrouter.ai/api/v1/chat/completions"
       :api-key @openrouter-api-key
       :body {:model "deepseek/deepseek-v4-flash"
              :messages [{:role "user"
@@ -388,7 +386,8 @@
     :else nil))
 
 (defmethod provider/call! :openai-compatible
-  [_provider {:keys [post! url model] response-schema :schema :as options}]
+  [_provider {:keys [post! url model] response-schema :schema
+              :or {post! http/post} :as options}]
   (let [converted (try
                     {:schema (schema/->json-schema response-schema)}
                     (catch Exception _

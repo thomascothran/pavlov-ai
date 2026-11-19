@@ -2,8 +2,9 @@
   "TypeSafe's native Jev decisions API (POST /v1/systemone); no chat or
   tool-call protocol.
 
-  provider/call! requires :post! (Hato-shaped transport), :model and
-  :input {:state ... :questions ...}. :url, :api-key and :headers are optional.
+  provider/call! requires :model and :input {:state ... :questions ...}.
+  :post! (Hato-shaped transport, default hato.client/post), :url, :api-key and
+  :headers are optional.
   Opt-in TypeSafe headers such as TypeSafe-Danger-Zone-Long-Context may be
   supplied through :headers. The adapter returns decoded answers; :schema is
   used by the caller for local decoding and validation, not sent to TypeSafe.
@@ -12,6 +13,7 @@
   APIs may diverge."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
+            [hato.client :as http]
             [tech.thomascothran.pavlov.ai.provider :as provider]))
 
 (def default-url "https://api.typesafe.ai/v1/systemone")
@@ -88,11 +90,12 @@
         :else {:data (:answers decoded)}))))
 
 (defmethod provider/call! :typesafe-decisions
-  [_provider {:keys [post! url model input messages api-key headers]}]
+  [_provider {:keys [post! url model input messages api-key headers]
+              :or {post! http/post}}]
   (if-not (and (ifn? post!) (text? model) (or (nil? url) (text? url))
                (nil? messages) (valid-input? input))
     (failure :cognitect.anomalies/incorrect :invalid-options
-             "TypeSafe decisions calls require :post!, :model and :input with state and typed questions")
+             "TypeSafe decisions calls require :model and :input with state and typed questions")
     (try
       (result
        (post! (or url default-url)

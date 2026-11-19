@@ -1,6 +1,7 @@
 (ns tech.thomascothran.pavlov.ai.provider.typesafe-decisions-test
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is]]
+            [hato.client :as http]
             [tech.thomascothran.pavlov.ai :as ai]))
 
 (def questions
@@ -152,3 +153,10 @@
     (is (= :decision-2 (get-in @outcomes [1 :event :call-id])))
     (is (= :cognitect.anomalies/unavailable
            (get-in @outcomes [1 :event :anomaly :cognitect.anomalies/category])))))
+
+(deftest posts-with-hato-when-no-post!-is-supplied
+  (let [calls (atom [])]
+    (with-redefs [http/post (fn [url _opts] (swap! calls conj url) (response answers))]
+      (is (= (assoc-in answers [:team :choice] :billing)
+             (ai/call! (update (request nil) :provider-options dissoc :post!)))))
+    (is (= ["https://api.typesafe.ai/v1/systemone"] @calls))))
