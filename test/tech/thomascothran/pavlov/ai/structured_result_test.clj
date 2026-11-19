@@ -1,6 +1,7 @@
 (ns tech.thomascothran.pavlov.ai.structured-result-test
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]]
+            [hato.client :as http]
             [tech.thomascothran.pavlov.ai :as ai]
             [tech.thomascothran.pavlov.ai.schema :as schema]
             [tech.thomascothran.pavlov.ai.schema.malli]))
@@ -186,3 +187,12 @@
                                            (swap! calls inc)
                                            (throw (IllegalStateException. "Callback bug")))})))
     (is (= 1 @calls))))
+
+(deftest posts-with-hato-when-no-post!-is-supplied
+  (let [calls (atom [])]
+    (with-redefs [http/post (fn [url _opts]
+                              (swap! calls conj url)
+                              (completion "{\"sentiment\":\"positive\",\"confidence\":0.9}"))]
+      (is (= {:sentiment :positive :confidence 0.9}
+             (ai/call! (update (request nil) :provider-options dissoc :post!)))))
+    (is (= ["https://model.example/chat/completions"] @calls))))

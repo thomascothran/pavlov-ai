@@ -1,12 +1,14 @@
 (ns tech.thomascothran.pavlov.ai.provider.openrouter-decisions
   "OpenRouter's native Decisions API; no chat or tool-call protocol.
 
-  provider/call! requires :post! (Hato-shaped transport), :model and
-  :input {:state ... :questions ...}. :url, :api-key and :headers are optional.
+  provider/call! requires :model and :input {:state ... :questions ...}.
+  :post! (Hato-shaped transport, default hato.client/post), :url, :api-key and
+  :headers are optional.
   The adapter returns decoded answers; :schema is used by the caller for local
   decoding and validation, not sent to the Decisions API."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
+            [hato.client :as http]
             [tech.thomascothran.pavlov.ai.provider :as provider]))
 
 (def default-url "https://openrouter.ai/api/alpha/decisions")
@@ -74,11 +76,12 @@
         :else {:data (:answers decoded)}))))
 
 (defmethod provider/call! :openrouter-decisions
-  [_provider {:keys [post! url model input messages api-key headers]}]
+  [_provider {:keys [post! url model input messages api-key headers]
+              :or {post! http/post}}]
   (if-not (and (ifn? post!) (text? model) (or (nil? url) (text? url))
                (nil? messages) (valid-input? input))
     (failure :cognitect.anomalies/incorrect :invalid-options
-             "Decisions calls require :post!, :model and :input with state and typed questions")
+             "Decisions calls require :model and :input with state and typed questions")
     (try
       (result
        (post! (or url default-url)
