@@ -62,16 +62,26 @@
       (is (zero? @calls)))))
 
 (deftest api-failures-return-anomalies
-  (doseq [[post! category]
-          [[(fn [_ _] {:status 429 :body "fixture-secret"}) :cognitect.anomalies/busy]
-           [(fn [_ _] (throw (java.net.ConnectException. "fixture-secret"))) :cognitect.anomalies/unavailable]
-           [(fn [_ _] (throw (java.net.SocketTimeoutException. "fixture-secret"))) :cognitect.anomalies/interrupted]
-           [(fn [_ _] {:status 200 :body "not JSON"}) :cognitect.anomalies/fault]
-           [(fn [_ _] {:status 200 :body "{}"}) :cognitect.anomalies/fault]
-           [(fn [_ _] {:status 200 :body "{\"answers\":[]}"}) :cognitect.anomalies/fault]]]
-    (let [result (ai/call! (request post!))]
-      (is (= category (:cognitect.anomalies/category result)))
-      (is (not (.contains (pr-str result) "fixture-secret"))))))
+  ;; [post! category copied?]: copied? is whether the provider's error text
+  ;; becomes the anomaly message by default.
+  (doseq [[post! category copied?]
+          [[(fn [_ _] {:status 400 :body "{\"error\":{\"message\":\"fixture-secret\",\"code\":400}}"})
+            :cognitect.anomalies/incorrect true]
+           [(fn [_ _] {:status 401 :body "{\"error\":\"fixture-secret\"}"})
+            :cognitect.anomalies/forbidden true]
+           [(fn [_ _] {:status 200 :body "{\"error\":{\"message\":\"fixture-secret\"}}"})
+            :cognitect.anomalies/fault true]
+           [(fn [_ _] {:status 429 :body "fixture-secret"}) :cognitect.anomalies/busy false]
+           [(fn [_ _] (throw (java.net.ConnectException. "fixture-secret"))) :cognitect.anomalies/unavailable true]
+           [(fn [_ _] (throw (java.net.SocketTimeoutException. "fixture-secret"))) :cognitect.anomalies/interrupted false]
+           [(fn [_ _] {:status 200 :body "not JSON"}) :cognitect.anomalies/fault false]
+           [(fn [_ _] {:status 200 :body "{}"}) :cognitect.anomalies/fault false]
+           [(fn [_ _] {:status 200 :body "{\"answers\":[]}"}) :cognitect.anomalies/fault false]]]
+    (let [result (ai/call! (request post!))
+          omitted (ai/call! (assoc-in (request post!) [:provider-options :omit-provider-error-message?] true))]
+      (is (= category (:cognitect.anomalies/category result) (:cognitect.anomalies/category omitted)))
+      (is (= copied? (= "fixture-secret" (:cognitect.anomalies/message result))))
+      (is (not (.contains (pr-str omitted) "fixture-secret"))))))
 
 (deftest handler-accepts-a-decision-event-with-structured-input
   (let [outcomes (atom []) req (request (fn [_ _] (response answers)))]
@@ -115,3 +125,28 @@
       (is (= (assoc-in answers [:team :choice] :billing)
              (ai/call! (update (request nil) :provider-options dissoc :post!)))))
     (is (= ["https://openrouter.ai/api/alpha/decisions"] @calls))))
+
+(deftest extra-body-and-timeout-reach-the-request
+  (let [calls (atom [])
+        _ (ai/call! (update (request (fn [url opts]
+                                       (swap! calls conj [url opts])
+                                       (response answers)))
+                            :provider-options merge
+                            {:timeout-ms 5000
+                             :effort :high
+                             :extra-body {:temperature 0 "model" "evil" :state "evil"}}))
+        [_ opts] (first @calls)
+        body (json/read-str (:body opts))]
+    (is (= 5000 (:timeout opts)))
+    (is (= 0 (get body "temperature")))
+    (is (not= "evil" (get body "model")))
+    (is (= {"ticket" "Double charged"} (get body "state")))
+    (is (not-any? #{"effort" "reasoning_effort" "api_key" "post!" "timeout-ms"} (keys body)))))
+
+(deftest malformed-settings-fail-without-http
+  (doseq [bad [{:extra-body [:not :a :map]} {:timeout-ms -1}]]
+    (let [calls (atom 0)
+          result (ai/call! (update (request (fn [_ _] (swap! calls inc) (response answers)))
+                                   :provider-options merge bad))]
+      (is (= :cognitect.anomalies/incorrect (:cognitect.anomalies/category result)))
+      (is (zero? @calls)))))

@@ -4,7 +4,7 @@
   Uses the logged-in Claude subscription: no API key and never `--bare`. Each
   call is independent (`--no-session-persistence`); history is caller-owned.
 
-  provider/call! requires :run!, :model, :effort and :schema. Supply either
+  provider/call! requires :run!, :model and :schema. Supply either
   string :input or a nonempty vector of text :messages, not both.
 
   Options:
@@ -14,7 +14,9 @@
                  java.io.IOException when the process cannot start.
                  `run-process` is a ready-made implementation.
   - :model       model name or alias, e.g. \"sonnet\" or \"haiku\".
-  - :effort      one of \"low\" \"medium\" \"high\" \"xhigh\" \"max\" (string or keyword).
+  - :effort      optional effort level (`--effort`), string or keyword, e.g.
+                 \"high\". Passed through unvalidated; the CLI decides what it
+                 accepts. Omitted: the CLI's default.
   - :tools       optional vector of built-in tool names. Default: no tools.
                  Configured tools are also pre-approved, because `-p` mode has
                  no interactive approval.
@@ -29,8 +31,12 @@
   `<turn role=\"...\">` text block per message, so successive calls with
   growing history reuse the cached prefix.
 
-  Returns {:data structured-output} or a Cognitect anomaly. CLI and provider
-  error text is never copied into anomalies."
+  Returns {:data structured-output} or a Cognitect anomaly. When the CLI fails
+  (error result, non-zero exit, or it cannot start), the anomaly message is the
+  CLI's own error text (result text or stderr), truncated; set
+  :omit-provider-error-message? true for a generic message instead. Reply text
+  is never copied. Note that the CLI ignores an unknown :effort with a stderr
+  warning and uses its default, so that call succeeds."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [tech.thomascothran.pavlov.ai.provider :as provider]
@@ -51,7 +57,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Request
 
-(def ^:private efforts #{"low" "medium" "high" "xhigh" "max"})
 (def ^:private roles #{"system" "developer" "user" "assistant"})
 (def ^:private instruction-roles #{"system" "developer"})
 
@@ -110,7 +115,7 @@
   [{:keys [run! model effort tools dir executable timeout-ms]}]
   (and (ifn? run!)
        (text? model)
-       (contains? efforts (named effort))
+       (or (nil? effort) (text? (named effort)))
        (or (nil? tools) (and (vector? tools) (every? text? tools)))
        (or (nil? dir) (text? dir))
        (or (nil? executable) (text? executable))
@@ -129,9 +134,9 @@
              "--setting-sources" ""
              "--disable-slash-commands"
              "--model" model
-             "--effort" (named effort)
              "--system-prompt" system-prompt
              "--json-schema" (json/write-str json-schema)]
+      (some? effort) (into ["--effort" (provider/effort-name effort)])
       (seq tools) (into ["--allowedTools" tool-list]))))
 
 ;; ---------------------------------------------------------------------------
@@ -160,32 +165,44 @@
             (str/split-lines out))
       (catch Exception _ nil))))
 
+(defn- result-error-text
+  "The error text of a failed result event: its :result text, else its
+  :errors strings."
+  [{:keys [result errors]}]
+  (cond
+    (and (string? result) (not (str/blank? result))) result
+    (sequential? errors) (some->> (filter string? errors) seq (str/join "; "))
+    :else nil))
+
 (defn- provider-error
-  [{:keys [api_error_status subtype]}]
-  (if (integer? api_error_status)
-    (failure (http-status-category api_error_status) :provider-error
-             (str "Claude CLI reported provider status " api_error_status)
-             {:status api_error_status})
-    (failure :cognitect.anomalies/fault :provider-error
-             "Claude CLI reported an error"
-             (cond-> {} (string? subtype) (assoc :subtype subtype)))))
+  [options {:keys [api_error_status subtype] :as result}]
+  (let [text (result-error-text result)]
+    (if (integer? api_error_status)
+      (failure (http-status-category api_error_status) :provider-error
+               (provider/error-message
+                options text
+                (str "Claude CLI reported provider status " api_error_status))
+               {:status api_error_status})
+      (failure :cognitect.anomalies/fault :provider-error
+               (provider/error-message options text "Claude CLI reported an error")
+               (cond-> {} (string? subtype) (assoc :subtype subtype))))))
 
 (defn- malformed
   [message]
   (failure :cognitect.anomalies/fault :malformed-response message {}))
 
 (defn- interpret
-  [{:keys [exit out]}]
+  [options {:keys [exit out err]}]
   (let [events (parse-events out)
         result (last (filter #(and (map? %) (= "result" (:type %))) events))]
     (cond
       (and result (or (true? (:is_error result))
                       (not= "success" (:subtype result))))
-      (provider-error result)
+      (provider-error options result)
 
       (not= 0 exit)
       (failure :cognitect.anomalies/fault :process-failed
-               "Claude CLI exited unsuccessfully"
+               (provider/error-message options err "Claude CLI exited unsuccessfully")
                (cond-> {} (integer? exit) (assoc :exit exit)))
 
       (nil? events) (malformed "Claude CLI output was not valid stream-json")
@@ -211,7 +228,7 @@
 
       (not (and (valid-options? options) parts))
       (failure :cognitect.anomalies/incorrect :invalid-options
-               (str "Claude CLI calls require :run!, :model, a supported :effort "
+               (str "Claude CLI calls require :run!, :model "
                     "and either string :input or text :messages with at least "
                     "one turn after the leading system/developer messages")
                {})
@@ -219,6 +236,7 @@
       :else
       (try
         (interpret
+         options
          (run! (cond-> {:command (command options (:system-prompt parts) (:schema converted))
                         :stdin (:stdin parts)}
                  dir (assoc :dir dir)
@@ -226,6 +244,8 @@
         (catch TimeoutException _
           (failure :cognitect.anomalies/interrupted :timeout
                    "Claude CLI call timed out" {}))
-        (catch IOException _
+        (catch IOException e
           (failure :cognitect.anomalies/unavailable :process-unavailable
-                   "Claude CLI could not be run" {}))))))
+                   (provider/error-message options (ex-message e)
+                                           "Claude CLI could not be run")
+                   {}))))))

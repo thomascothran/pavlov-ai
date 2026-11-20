@@ -3,6 +3,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [tech.thomascothran.pavlov.ai :as ai]
+            [tech.thomascothran.pavlov.ai.provider :as provider]
             [tech.thomascothran.pavlov.ai.provider.pi-cli]
             [tech.thomascothran.pavlov.ai.schema :as schema]))
 
@@ -119,6 +120,16 @@
                                                                (keyword level))))
                              "--thinking")))))
 
+(deftest effort-is-optional-and-passed-through-unvalidated
+  (testing "without :effort, no --thinking flag is sent"
+    (let [command (:command (first-call #(update % :provider-options dissoc :effort)))]
+      (is (not (some #{"--thinking"} command)))))
+  (testing "any effort value reaches pi; pi decides what it accepts"
+    (is (= "ultra-mega"
+           (flag-value (:command (first-call #(assoc-in % [:provider-options :effort]
+                                                         :ultra-mega)))
+                       "--thinking")))))
+
 (deftest system-prompt-carries-instructions-and-json-schema
   (let [prompt (system-prompt
                 (first-call #(-> % (dissoc :input)
@@ -227,8 +238,8 @@
            ["blank :model-provider" {:model-provider " "}]
            ["missing :model" {:model nil}]
            ["blank :model" {:model " "}]
-           ["missing :effort" {:effort nil}]
-           ["unknown :effort" {:effort "extreme"}]
+           ["non-text :effort" {:effort 42}]
+           ["blank :effort" {:effort " "}]
            ["string :tools" {:tools "read"}]
            ["tool modifier, which would keep pi's default tools" {:tools ["+read"]}]
            ["tool exclusion" {:tools ["-bash"]}]
@@ -269,7 +280,11 @@
     (is (= :schema-violation
            (:kind (ai/call! (request (constantly {:exit 0 :out (success-out {:reply 42}) :err ""}))))))))
 
-(deftest failures-are-anomalies-without-copied-text
+(def ^:private copies-error-text
+  "Failures whose anomaly message is pi's own error text by default."
+  #{"non-zero exit" "provider error" "aborted"})
+
+(deftest failures-are-anomalies-carrying-only-error-text
   (doseq [[label response expected]
           [["non-zero exit" {:exit 1 :out "fixture-secret" :err "Error: fixture-secret"}
             :cognitect.anomalies/fault]
@@ -302,9 +317,20 @@
            ["two fences" {:exit 0 :out (text-out "```json\n{}\n```\n```json\n{\"fixture-secret\": 1}\n```") :err ""}
             :cognitect.anomalies/fault]]]
     (testing label
-      (let [result (ai/call! (request (constantly response)))]
-        (is (= expected (category result)))
-        (is (not (str/includes? (pr-str result) "fixture-secret")))))))
+      (let [result (ai/call! (request (constantly response)))
+            omitted (ai/call! (request (constantly response)
+                                       {:omit-provider-error-message? true}))]
+        (is (= expected (category result) (category omitted)))
+        (testing "error text is copied by default; reply text never is"
+          (is (= (contains? copies-error-text label)
+                 (str/includes? (:cognitect.anomalies/message result) "fixture-secret"))))
+        (testing "with :omit-provider-error-message?, nothing is copied"
+          (is (not (str/includes? (pr-str omitted) "fixture-secret"))))))))
+
+(deftest long-error-text-is-truncated
+  (let [result (ai/call! (request (constantly {:exit 1 :out "" :err (apply str (repeat 5000 "x"))})))]
+    (is (= (inc provider/max-error-message-length)
+           (count (:cognitect.anomalies/message result))))))
 
 (deftest the-last-assistant-message-is-the-answer
   (is (= {:reply "final"}
@@ -323,9 +349,13 @@
            ["missing binary" (java.io.IOException. "Cannot run program \"pi\": fixture-secret")
             :cognitect.anomalies/unavailable]]]
     (testing label
-      (let [result (ai/call! (request (fn [_] (throw ex))))]
-        (is (= expected (category result)))
-        (is (not (str/includes? (pr-str result) "fixture-secret")))))))
+      (let [result (ai/call! (request (fn [_] (throw ex))))
+            omitted (ai/call! (request (fn [_] (throw ex)) {:omit-provider-error-message? true}))]
+        (is (= expected (category result) (category omitted)))
+        (testing "only the start failure's message is copied by default"
+          (is (= (= "missing binary" label)
+                 (str/includes? (pr-str result) "fixture-secret"))))
+        (is (not (str/includes? (pr-str omitted) "fixture-secret")))))))
 
 (deftest configured-tools-replace-no-tools
   (let [{:keys [command]} (first-call #(assoc-in % [:provider-options :tools] ["read" "grep"]))]

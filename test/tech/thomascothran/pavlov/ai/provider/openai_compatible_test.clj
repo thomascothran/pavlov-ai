@@ -169,3 +169,90 @@
                          :function {:name "email_list"
                                     :arguments "not-json"}}]}
                       :finish_reason "tool_calls"}]}})))))
+
+;; ---------------------------------------------------------------------------
+;; provider/call! request settings: :effort, :timeout-ms, :extra-body
+
+(defn- structured-post!
+  "Fake :post! recording [url options-with-decoded-body] and returning a
+  successful structured reply."
+  [calls]
+  (fn [url options]
+    (swap! calls conj [url (update options :body json/read-str)])
+    {:status 200
+     :body (json/write-str
+            {:choices [{:message {:role "assistant" :content "{\"reply\":\"Hi\"}"}
+                        :finish_reason "stop"}]})}))
+
+(defn- structured-call
+  [provider-options]
+  (let [calls (atom [])
+        result (provider/call!
+                :openai-compatible
+                (merge {:post! (structured-post! calls)
+                        :url "https://openrouter.ai/api/v1/chat/completions"
+                        :api-key "secret"
+                        :headers {"X-Title" "Pavlov"}
+                        :model "openai/gpt-6"
+                        :input "Say hi"
+                        :schema [:map [:reply :string]]}
+                       provider-options))]
+    {:result result
+     :options (second (first @calls))
+     :body (:body (second (first @calls)))
+     :calls @calls}))
+
+(deftest call-sends-effort-as-reasoning-effort
+  (testing "keyword effort is sent by name, unvalidated"
+    (let [{:keys [result body]} (structured-call {:effort :ultra})]
+      (is (= {:data {:reply "Hi"}} result))
+      (is (= "ultra" (get body "reasoning_effort")))))
+  (testing "string effort is sent as given"
+    (is (= "high" (get (:body (structured-call {:effort "high"})) "reasoning_effort"))))
+  (testing "without :effort, no reasoning field is sent"
+    (is (not (contains? (:body (structured-call {})) "reasoning_effort")))))
+
+(deftest call-passes-timeout-to-the-transport
+  (is (= 30000 (:timeout (:options (structured-call {:timeout-ms 30000})))))
+  (is (not (contains? (:options (structured-call {})) :timeout))))
+
+(deftest call-merges-extra-body
+  (let [{:keys [body]} (structured-call
+                        {:effort :low
+                         :extra-body {:service_tier "flex"
+                                      "provider" {"sort" "price"}
+                                      :reasoning_effort "high"
+                                      :model "evil/model"
+                                      "messages" []
+                                      :response_format nil
+                                      :stream true}})]
+    (testing "provider-specific fields reach the body"
+      (is (= "flex" (get body "service_tier")))
+      (is (= {"sort" "price"} (get body "provider"))))
+    (testing ":extra-body overrides the field produced by :effort"
+      (is (= "high" (get body "reasoning_effort"))))
+    (testing "adapter-owned fields win, whether keyed by keyword or string"
+      (is (= "openai/gpt-6" (get body "model")))
+      (is (= [{"role" "user" "content" "Say hi"}] (get body "messages")))
+      (is (= "json_schema" (get-in body ["response_format" "type"])))
+      (is (= false (get body "stream"))))))
+
+(deftest call-never-serializes-non-wire-options
+  (let [{:keys [body options]} (structured-call {:effort :low :timeout-ms 1000
+                                                 :extra-body {:service_tier "flex"}})]
+    (is (= #{"model" "messages" "response_format" "stream"
+             "reasoning_effort" "service_tier"}
+           (set (keys body))))
+    (is (= "Bearer secret" (get-in options [:headers "Authorization"])))
+    (is (= "Pavlov" (get-in options [:headers "X-Title"])))))
+
+(deftest call-rejects-malformed-settings-without-http
+  (doseq [bad [{:extra-body "service_tier=flex"} {:timeout-ms 0} {:timeout-ms "1000"}]]
+    (let [{:keys [result calls]} (structured-call bad)]
+      (is (= :cognitect.anomalies/incorrect (:cognitect.anomalies/category result)) (pr-str bad))
+      (is (empty? calls)))))
+
+(deftest call-ignores-unrecognized-options
+  (let [{:keys [result body]} (structured-call {:temperature 0.2 :whatever :x})]
+    (is (= {:data {:reply "Hi"}} result))
+    (is (not (contains? body "temperature")))))

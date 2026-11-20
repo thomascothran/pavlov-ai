@@ -5,7 +5,7 @@
   concern, and Pavlov AI passes no credentials. Each call is independent
   (`--no-session`); history is caller-owned.
 
-  provider/call! requires :run!, :model-provider, :model, :effort and :schema.
+  provider/call! requires :run!, :model-provider, :model and :schema.
   Supply either string :input or a nonempty vector of text :messages, not both.
 
   Options:
@@ -17,8 +17,9 @@
                      is a ready-made implementation.
   - :model-provider  pi provider name (`--provider`), e.g. \"openai-codex\".
   - :model           model id (`--model`), e.g. \"gpt-6-luna\".
-  - :effort          thinking level (`--thinking`): one of \"off\" \"minimal\"
-                     \"low\" \"medium\" \"high\" \"xhigh\" \"max\" (string or keyword).
+  - :effort          optional thinking level (`--thinking`), string or keyword,
+                     e.g. \"high\". Passed through unvalidated; pi decides what
+                     it accepts. Omitted: pi's default.
   - :tools           optional vector of tool names. Default: no tools.
   - :dir             optional working directory. Default nil: the CLI inherits
                      the JVM's working directory. It is never created. pi puts it
@@ -38,8 +39,12 @@
   by Malli validation in `ai/call!`. The reply must be exactly one JSON value,
   optionally inside a single Markdown code fence.
 
-  Returns {:data decoded-json} or a Cognitect anomaly. CLI and provider error
-  text is never copied into anomalies."
+  Returns {:data decoded-json} or a Cognitect anomaly. When pi fails (non-zero
+  exit, provider error, abort, or the CLI cannot start), the anomaly message is
+  pi's own error text (stderr or errorMessage), truncated; set
+  :omit-provider-error-message? true for a generic message instead. Reply text
+  is never copied. Note that pi ignores an unknown :effort with a stderr
+  warning and uses its default, so that call succeeds."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [tech.thomascothran.pavlov.ai.provider :as provider]
@@ -53,7 +58,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Request
 
-(def ^:private efforts #{"off" "minimal" "low" "medium" "high" "xhigh" "max"})
 (def ^:private roles #{"system" "developer" "user" "assistant"})
 (def ^:private instruction-roles #{"system" "developer"})
 
@@ -120,7 +124,7 @@
   (and (ifn? run!)
        (text? model-provider)
        (text? model)
-       (contains? efforts (named effort))
+       (or (nil? effort) (text? (named effort)))
        (or (nil? tools) (and (vector? tools) (every? tool-name? tools)))
        (or (nil? dir) (text? dir))
        (or (nil? executable) (text? executable))
@@ -146,10 +150,9 @@
        "--no-extensions" "--no-skills" "--no-prompt-templates" "--no-themes"
        "--no-context-files" "--no-mcp" "--no-approve" "--offline"]
       (into (if (seq tools) ["--tools" (str/join "," tools)] ["--no-tools"]))
-      (into ["--provider" model-provider
-             "--model" model
-             "--thinking" (named effort)
-             "--session-id" (session-id options system-prompt)
+      (into ["--provider" model-provider "--model" model])
+      (cond-> (some? effort) (into ["--thinking" (provider/effort-name effort)]))
+      (into ["--session-id" (session-id options system-prompt)
              "--system-prompt" system-prompt])))
 
 ;; ---------------------------------------------------------------------------
@@ -208,27 +211,31 @@
   (failure :cognitect.anomalies/fault :malformed-response message {}))
 
 (defn- stop-failure
-  [stop-reason]
+  [options {stop-reason :stopReason error-text :errorMessage}]
   (case stop-reason
     "error" (failure :cognitect.anomalies/fault :provider-error
-                     "pi reported a provider error" {})
+                     (provider/error-message options error-text
+                                             "pi reported a provider error")
+                     {})
     "aborted" (failure :cognitect.anomalies/interrupted :aborted
-                       "pi aborted the response" {})
+                       (provider/error-message options error-text
+                                               "pi aborted the response")
+                       {})
     "length" (failure :cognitect.anomalies/fault :truncated
                       "pi response hit the output limit" {})
     (malformed "pi response ended for an unexpected reason")))
 
 (defn- interpret
-  [{:keys [exit out]}]
+  [options {:keys [exit out err]}]
   (let [events (parse-events out)
         message (final-assistant-message events)
         stop-reason (:stopReason message)]
     (cond
-      (and message (not= "stop" stop-reason)) (stop-failure stop-reason)
+      (and message (not= "stop" stop-reason)) (stop-failure options message)
 
       (not= 0 exit)
       (failure :cognitect.anomalies/fault :process-failed
-               "pi exited unsuccessfully"
+               (provider/error-message options err "pi exited unsuccessfully")
                (cond-> {} (integer? exit) (assoc :exit exit)))
 
       (nil? events) (malformed "pi output was not valid JSONL")
@@ -259,8 +266,8 @@
 
       (not (and (valid-options? options) parts))
       (failure :cognitect.anomalies/incorrect :invalid-options
-               (str "pi CLI calls require :run!, :model-provider, :model, a "
-                    "supported :effort and either string :input or text "
+               (str "pi CLI calls require :run!, :model-provider, :model "
+                    "and either string :input or text "
                     ":messages with at least one turn after the leading "
                     "system/developer messages")
                {})
@@ -268,6 +275,7 @@
       :else
       (try
         (interpret
+         options
          (run! (cond-> {:command (command options (:system-prompt parts))
                         :stdin (:stdin parts)}
                  dir (assoc :dir dir)
@@ -275,6 +283,8 @@
         (catch TimeoutException _
           (failure :cognitect.anomalies/interrupted :timeout
                    "pi CLI call timed out" {}))
-        (catch IOException _
+        (catch IOException e
           (failure :cognitect.anomalies/unavailable :process-unavailable
-                   "pi CLI could not be run" {}))))))
+                   (provider/error-message options (ex-message e)
+                                           "pi CLI could not be run")
+                   {}))))))

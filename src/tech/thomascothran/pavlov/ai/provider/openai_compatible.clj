@@ -2,9 +2,29 @@
   "OpenAI-compatible chat and schema-constrained model calls.
 
   provider/call! requires :url, :model and :schema. :post! (Hato-shaped
-  transport, default hato.client/post), :api-key and :headers are optional. Supply either string :input or
-  a nonempty vector of text :messages, not both. The adapter converts :schema
-  to JSON Schema for response_format and parses the model's JSON content.
+  transport, default hato.client/post), :api-key and :headers are optional.
+  Supply either string :input or a nonempty vector of text :messages, not both.
+
+  Optional request settings:
+  - :effort      sent as top-level `reasoning_effort` (OpenAI; OpenRouter also
+                 accepts it). Keywords are sent by name; values are not
+                 validated, so use whatever the model accepts.
+  - :timeout-ms  per-request timeout, passed to :post! as Hato's :timeout.
+  - :extra-body  map merged into the JSON request body, e.g.
+                 {:service_tier \"flex\"} or {:reasoning {:effort \"max\"}}. It
+                 overrides the body field produced by :effort, but the adapter's
+                 own fields (model, messages, response_format, stream) win.
+  Options are never forwarded to the body except through these keys.
+  Unrecognized options are ignored.
+
+  Errors: when the provider rejects a request, the anomaly carries its error
+  message (:cognitect.anomalies/message and [:error :message]) and, when
+  present, [:error :provider-code], :provider-type and :provider-param.
+  Provider messages may echo request input; set
+  :omit-provider-error-message? true to replace them with a generic message
+  while keeping code, type and param. Default false.
+
+  The adapter converts :schema to JSON Schema for response_format and parses the model's JSON content.
   The provider/model must support that output format; no tool calls are used."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
@@ -19,12 +39,25 @@
     {"Authorization" (str "Bearer " api-key)}))
 
 (defn- request-options
-  [{:keys [api-key headers body]}]
-  {:headers (merge {"Content-Type" "application/json"}
-                   (authorization-headers api-key)
-                   headers)
-   :body (json/write-str (assoc body :stream false))
-   :throw-exceptions false})
+  [{:keys [api-key headers body timeout-ms]}]
+  (cond-> {:headers (merge {"Content-Type" "application/json"}
+                           (authorization-headers api-key)
+                           headers)
+           :body (json/write-str (assoc body :stream false))
+           :throw-exceptions false}
+    timeout-ms (assoc :timeout timeout-ms)))
+
+(defn- structured-body
+  [{:keys [model effort extra-body]} messages json-schema]
+  (merge (when (some? effort)
+           {:reasoning_effort (provider/effort-name effort)})
+         (provider/request-body
+          extra-body
+          {:model model
+           :messages messages
+           :response_format {:type "json_schema"
+                             :json_schema {:name "pavlov_result"
+                                           :schema json-schema}}})))
 
 (defn- decode-response-body
   [body]
@@ -76,16 +109,31 @@
     :else :cognitect.anomalies/fault))
 
 (defn- provider-error
+  "A failure carrying the provider's own error message, code, type and param
+  from an OpenAI-style {\"error\": {...}} BODY, so that callers can see why a
+  request was rejected. Falls back to a generic message when BODY has none."
   [category kind status body]
   (let [error (when (map? body) (:error body))
-        message (or (:message error)
-                    (str "Provider returned HTTP status " status))]
+        message (provider/error-message
+                 {}
+                 (cond
+                   (map? error) (:message error)
+                   (string? error) error
+                   :else nil)
+                 (str "Provider returned HTTP status " status))
+        error (when (map? error) error)]
     (failure category
              kind
              message
              (cond-> {:status status}
                (:code error) (assoc :provider-code (:code error))
-               (:type error) (assoc :provider-type (:type error))))))
+               (:type error) (assoc :provider-type (:type error))
+               (:param error) (assoc :provider-param (:param error))))))
+
+(defn- decode-error-body
+  "BODY decoded as JSON, or nil when it is not JSON."
+  [body]
+  (try (decode-response-body body) (catch Exception _ nil)))
 
 (defn- decode-action-arguments
   [provider-call-id arguments]
@@ -322,7 +370,15 @@
                          :content "Say hello in one short sentence."}]}}))
   (provider/normalize-chat-completion :openai-compatible r))
 
-(defn- structured-response
+(defn- omit-provider-message
+  "Replace the provider's free-text message in FAILURE with a generic one."
+  [failure status]
+  (let [message (str "Provider returned an error (HTTP status " status ")")]
+    (-> failure
+        (assoc :cognitect.anomalies/message message)
+        (assoc-in [:error :message] message))))
+
+(defn- interpret-structured-response
   [{:keys [status body]}]
   (cond
     (not (integer? status))
@@ -330,8 +386,8 @@
              "Provider response is missing an integer status" {})
 
     (not (successful-status? status))
-    (assoc (failure (http-status-category status) :provider-http-error
-                    "Provider returned an unsuccessful HTTP status" {})
+    (assoc (provider-error (http-status-category status) :provider-http-error
+                           status (decode-error-body body))
            :status status)
 
     :else
@@ -344,8 +400,8 @@
       (cond
         (provider/anomaly? decoded) decoded
         (:error decoded)
-        (failure :cognitect.anomalies/fault :provider-error
-                 "Provider returned an error" {})
+        (provider-error :cognitect.anomalies/fault :provider-error
+                        status decoded)
         (:refusal message)
         (failure :cognitect.anomalies/forbidden :refusal
                  "Model refused the request" {})
@@ -366,6 +422,15 @@
             {:cognitect.anomalies/category :cognitect.anomalies/incorrect
              :cognitect.anomalies/message "Model output is not valid JSON"
              :kind :invalid-json}))))))
+
+(defn- structured-response
+  "Interpret RESPONSE, omitting the provider's error message when OPTIONS ask."
+  [{:keys [omit-provider-error-message?]} response]
+  (let [result (interpret-structured-response response)]
+    (if (and omit-provider-error-message?
+             (#{:provider-http-error :provider-error} (get-in result [:error :kind])))
+      (omit-provider-message result (:status response))
+      result)))
 
 (defn- request-messages
   [{:keys [input messages] :as options}]
@@ -397,20 +462,21 @@
         messages (request-messages options)]
     (cond
       (provider/anomaly? converted) converted
-      (not (and (ifn? post!) (string? url) (string? model) messages))
+      (not (and (ifn? post!) (string? url) (string? model) messages
+                (provider/valid-extra-body? (:extra-body options))
+                (or (nil? (:timeout-ms options)) (pos-int? (:timeout-ms options)))))
       (failure :cognitect.anomalies/incorrect :invalid-options
-               "Structured calls require transport options and either string :input or nonempty text :messages" {})
+               (str "Structured calls require transport options, either string "
+                    ":input or nonempty text :messages, a map :extra-body and a "
+                    "positive :timeout-ms when given") {})
       :else
       (try
         (structured-response
+         options
          (post! url
                 (request-options
                  (assoc options :body
-                        {:model model
-                         :messages messages
-                         :response_format {:type "json_schema"
-                                           :json_schema {:name "pavlov_result"
-                                                         :schema (:schema converted)}}}))))
+                        (structured-body options messages (:schema converted))))))
         (catch java.net.SocketTimeoutException _
           (failure :cognitect.anomalies/interrupted :timeout
                    "Model request timed out" {}))

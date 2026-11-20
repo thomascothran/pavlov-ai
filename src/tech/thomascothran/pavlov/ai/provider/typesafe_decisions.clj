@@ -9,6 +9,18 @@
   supplied through :headers. The adapter returns decoded answers; :schema is
   used by the caller for local decoding and validation, not sent to TypeSafe.
 
+  Optional request settings:
+  - :timeout-ms  per-request timeout, passed to :post! as Hato's :timeout.
+  - :extra-body  map merged into the JSON request body; the adapter's own
+                 fields (model, state, questions) win.
+  - :omit-provider-error-message?  when true, anomalies get a generic message
+                 instead of TypeSafe's error detail. Default false.
+  :effort is not sent: this API has no reasoning-effort field.
+
+  Failed calls carry TypeSafe's error detail ({\"detail\": ...}, including
+  validation errors as \"location: message\") as the anomaly message, truncated.
+  Non-JSON error bodies are not copied.
+
   Deliberately independent of the OpenRouter decisions adapter so that the two
   APIs may diverge."
   (:require [clojure.data.json :as json]
@@ -63,25 +75,57 @@
     (<= 400 status 499) :cognitect.anomalies/incorrect
     :else :cognitect.anomalies/fault))
 
-(defn- result [{:keys [status body]}]
+(defn- decode-body
+  "BODY decoded as JSON, or ::invalid when it is not JSON."
+  [body]
+  (try (if (string? body) (json/read-str body :key-fn keyword) body)
+       (catch Exception _ ::invalid)))
+
+(defn- validation-error-text
+  [{:keys [loc msg]}]
+  (when (string? msg)
+    (if (sequential? loc)
+      (str (str/join "." loc) ": " msg)
+      msg)))
+
+(defn- error-text
+  "TypeSafe's error detail from a decoded BODY, if any. Validation errors
+  ([{\"loc\": [...], \"msg\": ...}]) become \"location: message\" entries;
+  API errors ({\"error_type\": ..., \"message\": ...}) give their message."
+  [body]
+  (when (map? body)
+    (let [{:keys [detail error]} body]
+      (cond
+        (string? detail) detail
+        (map? detail) (:message detail)
+        (sequential? detail) (some->> (keep #(when (map? %) (validation-error-text %)) detail)
+                                      seq
+                                      (str/join "; "))
+        (string? error) error
+        (map? error) (:message error)
+        :else nil))))
+
+(defn- result [options {:keys [status body]}]
   (cond
     (not (integer? status))
     (failure :cognitect.anomalies/fault :malformed-http-response
              "TypeSafe response is missing an integer HTTP status")
     (not (<= 200 status 299))
-    ;; Error bodies ({"detail": ...}) are not copied: they may echo input.
     (assoc (failure (status-category status) :provider-http-error
-                    "TypeSafe API returned an unsuccessful HTTP status") :status status)
+                    (provider/error-message
+                     options (error-text (decode-body body))
+                     "TypeSafe API returned an unsuccessful HTTP status"))
+           :status status)
     :else
-    (let [parsed (try {:body (if (string? body) (json/read-str body :key-fn keyword) body)}
-                      (catch Exception _
-                        (failure :cognitect.anomalies/fault :invalid-json
-                                 "TypeSafe response is not valid JSON")))
-          decoded (:body parsed)]
+    (let [decoded (decode-body body)]
       (cond
-        (provider/anomaly? parsed) parsed
+        (= ::invalid decoded)
+        (failure :cognitect.anomalies/fault :invalid-json
+                 "TypeSafe response is not valid JSON")
         (and (map? decoded) (or (:error decoded) (:detail decoded)))
-        (failure :cognitect.anomalies/fault :provider-error "TypeSafe API returned an error")
+        (failure :cognitect.anomalies/fault :provider-error
+                 (provider/error-message options (error-text decoded)
+                                         "TypeSafe API returned an error"))
         (not (and (map? decoded) (map? (:answers decoded)) (seq (:answers decoded))))
         (failure :cognitect.anomalies/fault :malformed-response
                  "TypeSafe response is missing an answers object")
@@ -90,23 +134,33 @@
         :else {:data (:answers decoded)}))))
 
 (defmethod provider/call! :typesafe-decisions
-  [_provider {:keys [post! url model input messages api-key headers]
-              :or {post! http/post}}]
+  [_provider {:keys [post! url model input messages api-key headers timeout-ms extra-body]
+              :or {post! http/post} :as options}]
   (if-not (and (ifn? post!) (text? model) (or (nil? url) (text? url))
-               (nil? messages) (valid-input? input))
+               (nil? messages) (valid-input? input)
+               (provider/valid-extra-body? extra-body)
+               (or (nil? timeout-ms) (pos-int? timeout-ms)))
     (failure :cognitect.anomalies/incorrect :invalid-options
-             "TypeSafe decisions calls require :model and :input with state and typed questions")
+             (str "TypeSafe decisions calls require :model and :input with state and typed questions, "
+                  "a map :extra-body and a positive :timeout-ms when given"))
     (try
       (result
+       options
        (post! (or url default-url)
-              {:headers (merge {"Content-Type" "application/json"}
-                               (when api-key {"Authorization" (str "Bearer " api-key)})
-                               headers)
-               :body (json/write-str {:model model :state (:state input) :questions (:questions input)})
-               :throw-exceptions false}))
+              (cond-> {:headers (merge {"Content-Type" "application/json"}
+                                       (when api-key {"Authorization" (str "Bearer " api-key)})
+                                       headers)
+                       :body (json/write-str
+                              (provider/request-body
+                               extra-body
+                               {:model model :state (:state input) :questions (:questions input)}))
+                       :throw-exceptions false}
+                timeout-ms (assoc :timeout timeout-ms))))
       (catch java.net.SocketTimeoutException _
         (failure :cognitect.anomalies/interrupted :timeout "TypeSafe request timed out"))
       (catch java.net.http.HttpTimeoutException _
         (failure :cognitect.anomalies/interrupted :timeout "TypeSafe request timed out"))
-      (catch java.io.IOException _
-        (failure :cognitect.anomalies/unavailable :connection-failure "TypeSafe transport failed")))))
+      (catch java.io.IOException e
+        (failure :cognitect.anomalies/unavailable :connection-failure
+                 (provider/error-message options (ex-message e)
+                                         "TypeSafe transport failed"))))))

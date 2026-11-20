@@ -1,4 +1,24 @@
-(ns tech.thomascothran.pavlov.ai.provider)
+(ns tech.thomascothran.pavlov.ai.provider
+  (:require [clojure.string :as str]))
+
+(def max-error-message-length
+  "Longest provider error text copied into an anomaly message."
+  2000)
+
+(defn error-message
+  "The anomaly message for a provider failure: TEXT, the provider's or CLI's own
+  error text, trimmed and truncated, or FALLBACK when TEXT is not a nonblank
+  string or OPTIONS set :omit-provider-error-message?. Provider text can echo
+  request input; the option keeps it out of anomalies, events and logs."
+  [options text fallback]
+  (if (and (not (:omit-provider-error-message? options))
+           (string? text)
+           (not (str/blank? text)))
+    (let [text (str/trim text)]
+      (if (> (count text) max-error-message-length)
+        (str (subs text 0 max-error-message-length) "…")
+        text))
+    fallback))
 
 (defn anomaly?
   "Return true when X is a Cognitect anomaly."
@@ -13,6 +33,28 @@
     (if (anomaly? x)
       x
       (f x))))
+
+(defn effort-name
+  "The wire form of a shared :effort option: a keyword's name, else EFFORT.
+  Values are not validated; the provider or CLI decides what it accepts."
+  [effort]
+  (if (keyword? effort) (name effort) effort))
+
+(defn request-body
+  "Merge EXTRA-BODY, the caller's :extra-body passthrough, under OWNED, the
+  fields an adapter builds itself. Top-level EXTRA-BODY keys may be keywords or
+  strings and are keywordized so they cannot duplicate OWNED keys; OWNED keys
+  always win. Nested values are sent as given."
+  [extra-body owned]
+  (merge (into {}
+               (map (fn [[k v]] [(if (string? k) (keyword k) k) v]))
+               extra-body)
+         owned))
+
+(defn valid-extra-body?
+  "True when EXTRA-BODY is absent or a map."
+  [extra-body]
+  (or (nil? extra-body) (map? extra-body)))
 
 (defmulti chat-completion!
   "Perform a non-streaming chat completion using PROVIDER.

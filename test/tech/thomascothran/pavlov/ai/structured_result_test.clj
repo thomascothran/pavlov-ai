@@ -121,6 +121,70 @@
               :on-complete! #(swap! outcomes conj %)})
     @outcomes))
 
+(defn- handle-with-event-options
+  "Run a handler configured with CONFIG-OPTIONS over (request post!) on one event
+  carrying EVENT-OPTIONS. Return [outcome [url post-options-with-decoded-body]]."
+  [config-options event-options]
+  (let [calls (atom [])
+        outcomes (atom [])
+        post! (fn [url opts]
+                (swap! calls conj [url (update opts :body json/read-str)])
+                (completion "{\"sentiment\":\"positive\",\"confidence\":0.9}"))
+        req (update (request post!) :provider-options merge config-options)
+        handler (ai/make-handler (select-keys req [:provider :provider-options]))]
+    (handler {:event (cond-> {:type :review/classify
+                              :schema result-schema
+                              :input (:input req)
+                              :call-id [:review 43]
+                              :success-event-type :review/classified
+                              :failure-event-type :review/classification-failed}
+                       event-options (assoc :provider-options event-options))
+              :on-complete! #(swap! outcomes conj %)})
+    [(first @outcomes) (first @calls)]))
+
+(deftest event-provider-options-override-call-settings
+  (let [[outcome [_ {:keys [body timeout]}]]
+        (handle-with-event-options
+         {:effort :low :timeout-ms 1000 :extra-body {:service_tier "flex"}}
+         {:model "event-model" :effort :high :timeout-ms 5000
+          :extra-body {:temperature 0}})]
+    (is (= :review/classified (get-in outcome [:event :type])))
+    (is (= "event-model" (get body "model")))
+    (is (= "high" (get body "reasoning_effort")))
+    (is (= 5000 timeout))
+    (testing ":extra-body is replaced, not deep-merged"
+      (is (= 0 (get body "temperature")))
+      (is (not (contains? body "service_tier")))))
+  (testing "configured settings apply when the event has none"
+    (let [[_ [_ {:keys [body timeout]}]] (handle-with-event-options {:effort :low :timeout-ms 1000} nil)]
+      (is (= "fixture-model" (get body "model")))
+      (is (= "low" (get body "reasoning_effort")))
+      (is (= 1000 timeout))))
+  (testing "non-map event options are ignored"
+    (let [[outcome [_ {:keys [body]}]] (handle-with-event-options {} [:model "x"])]
+      (is (= :review/classified (get-in outcome [:event :type])))
+      (is (= "fixture-model" (get body "model"))))))
+
+(deftest event-provider-options-cannot-override-destination-credentials-or-transport
+  (let [event-post-calls (atom 0)
+        [outcome [url {:keys [headers body]}]]
+        (handle-with-event-options
+         {:headers {"X-Title" "Pavlov"}}
+         {:url "https://untrusted.example/steal"
+          :api-key "event-key"
+          :headers {"X-Title" "evil"}
+          :post! (fn [_ _] (swap! event-post-calls inc))
+          :run! (fn [_] (swap! event-post-calls inc))
+          :executable "/tmp/evil"
+          :model "event-model"})]
+    (is (= :review/classified (get-in outcome [:event :type])))
+    (is (= "https://model.example/chat/completions" url))
+    (is (= "Bearer fixture-secret" (get headers "Authorization")))
+    (is (= "Pavlov" (get headers "X-Title")))
+    (is (zero? @event-post-calls))
+    (testing "other settings in the same event still apply"
+      (is (= "event-model" (get body "model"))))))
+
 (deftest io-handler-completes-once-with-correlated-validated-data
   (is (= [{:event {:type :review/classified
                    :call-id [:review 42]
@@ -157,16 +221,69 @@
     (is (zero? @calls))))
 
 (deftest http-status-survives-a-non-json-error-body
-  (let [result (ai/call! (request (fn [_ _] {:status 503 :body "fixture-secret"})))]
+  (let [result (ai/call! (request (fn [_ _] {:status 503 :body "<html>fixture-page</html>"})))]
     (is (= :cognitect.anomalies/unavailable (:cognitect.anomalies/category result)))
     (is (= 503 (:status result)))
-    (is (not (.contains (pr-str result) "fixture-secret")))))
+    (is (= "Provider returned HTTP status 503" (:cognitect.anomalies/message result)))
+    (testing "a non-JSON body is not copied"
+      (is (not (.contains (pr-str result) "fixture-page"))))))
 
-(deftest provider-error-text-is-not-exposed-in-anomalies
-  (let [result (ai/call! (request (fn [_ _]
-                                    {:status 200
-                                     :body "{\"error\":{\"message\":\"fixture-secret\"}}"})))]
-    (is (anomaly? result))
+(deftest provider-error-details-are-reported-in-anomalies
+  (testing "an HTTP error carries the provider's message, code, type and param"
+    (let [result (ai/call! (request (fn [_ _]
+                                      {:status 400
+                                       :body (json/write-str
+                                              {:error {:message "Unsupported value: 'ultra'"
+                                                       :code "unsupported_value"
+                                                       :type "invalid_request_error"
+                                                       :param "reasoning_effort"}})})))]
+      (is (= :cognitect.anomalies/incorrect (:cognitect.anomalies/category result)))
+      (is (= "Unsupported value: 'ultra'" (:cognitect.anomalies/message result)))
+      (is (= 400 (:status result)))
+      (is (= {:kind :provider-http-error
+              :message "Unsupported value: 'ultra'"
+              :status 400
+              :provider-code "unsupported_value"
+              :provider-type "invalid_request_error"
+              :provider-param "reasoning_effort"}
+             (:error result)))))
+  (testing "an error in a 200 response carries the provider's message"
+    (let [result (ai/call! (request (fn [_ _]
+                                      {:status 200
+                                       :body "{\"error\":{\"message\":\"Upstream failed\",\"code\":502}}"})))]
+      (is (anomaly? result))
+      (is (= "Upstream failed" (:cognitect.anomalies/message result)))
+      (is (= 502 (get-in result [:error :provider-code])))))
+  (testing "a string error is used as the message"
+    (let [result (ai/call! (request (fn [_ _] {:status 401 :body "{\"error\":\"No auth\"}"})))]
+      (is (= :cognitect.anomalies/forbidden (:cognitect.anomalies/category result)))
+      (is (= "No auth" (:cognitect.anomalies/message result))))))
+
+(deftest provider-error-message-can-be-omitted
+  (let [body (json/write-str {:error {:message "echoed fixture-input"
+                                      :code "unsupported_value"
+                                      :param "reasoning_effort"}})
+        call (fn [status options]
+               (ai/call! (update (request (fn [_ _] {:status status :body body}))
+                                 :provider-options merge options)))]
+    (testing "HTTP errors keep code and param but not the message"
+      (let [result (call 400 {:omit-provider-error-message? true})]
+        (is (= :cognitect.anomalies/incorrect (:cognitect.anomalies/category result)))
+        (is (= "Provider returned an error (HTTP status 400)"
+               (:cognitect.anomalies/message result)))
+        (is (= "unsupported_value" (get-in result [:error :provider-code])))
+        (is (= "reasoning_effort" (get-in result [:error :provider-param])))
+        (is (not (.contains (pr-str result) "fixture-input")))))
+    (testing "errors in a 200 response too"
+      (is (not (.contains (pr-str (call 200 {:omit-provider-error-message? true}))
+                          "fixture-input"))))
+    (testing "off by default"
+      (is (= "echoed fixture-input" (:cognitect.anomalies/message (call 400 {})))))))
+
+(deftest credentials-are-never-copied-into-anomalies
+  (let [result (ai/call! (-> (request (fn [_ _] {:status 401 :body "{\"error\":{\"message\":\"Bad key\"}}"}))
+                             (assoc-in [:provider-options :api-key] "fixture-secret")))]
+    (is (= "Bad key" (:cognitect.anomalies/message result)))
     (is (not (.contains (pr-str result) "fixture-secret")))))
 
 (deftest programming-defects-are-not-reported-as-provider-failures

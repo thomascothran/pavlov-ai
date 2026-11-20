@@ -98,22 +98,30 @@
     (is (= :cognitect.anomalies/incorrect (:cognitect.anomalies/category result)))
     (is (zero? @calls))))
 
-(deftest api-failures-return-anomalies-without-leaking-details
-  (doseq [[post! category]
-          [[(fn [_ _] {:status 422 :body "{\"detail\":[{\"loc\":[\"body\"],\"msg\":\"fixture-secret\"}]}"})
-            :cognitect.anomalies/incorrect]
-           [(fn [_ _] {:status 400 :body "{\"detail\":\"fixture-secret\"}"}) :cognitect.anomalies/incorrect]
-           [(fn [_ _] {:status 401 :body "fixture-secret"}) :cognitect.anomalies/forbidden]
-           [(fn [_ _] {:status 429 :body "fixture-secret"}) :cognitect.anomalies/busy]
-           [(fn [_ _] (throw (java.net.ConnectException. "fixture-secret"))) :cognitect.anomalies/unavailable]
-           [(fn [_ _] (throw (java.net.SocketTimeoutException. "fixture-secret"))) :cognitect.anomalies/interrupted]
-           [(fn [_ _] {:status 200 :body "not JSON"}) :cognitect.anomalies/fault]
-           [(fn [_ _] {:status 200 :body "{}"}) :cognitect.anomalies/fault]
-           [(fn [_ _] {:status 200 :body "{\"detail\":\"fixture-secret\"}"}) :cognitect.anomalies/fault]
-           [(fn [_ _] {:status 200 :body "{\"answers\":[]}"}) :cognitect.anomalies/fault]]]
-    (let [result (ai/call! (request post!))]
-      (is (= category (:cognitect.anomalies/category result)))
-      (is (not (.contains (pr-str result) "fixture-secret"))))))
+(deftest api-failures-return-anomalies-with-error-detail
+  ;; [post! category message]: message is the default anomaly message when the
+  ;; provider's error text is copied, or nil when it must not be.
+  (doseq [[post! category message]
+          [[(fn [_ _] {:status 422 :body "{\"detail\":[{\"loc\":[\"body\",\"questions\"],\"msg\":\"fixture-secret\"},{\"loc\":[\"body\"],\"msg\":\"second\"}]}"})
+            :cognitect.anomalies/incorrect "body.questions: fixture-secret; body: second"]
+           [(fn [_ _] {:status 400 :body "{\"detail\":\"fixture-secret\"}"}) :cognitect.anomalies/incorrect "fixture-secret"]
+           [(fn [_ _] {:status 400 :body "{\"detail\":{\"error_type\":\"api_usage_error\",\"message\":\"fixture-secret\"}}"})
+            :cognitect.anomalies/incorrect "fixture-secret"]
+           [(fn [_ _] {:status 401 :body "fixture-secret"}) :cognitect.anomalies/forbidden nil]
+           [(fn [_ _] {:status 429 :body "fixture-secret"}) :cognitect.anomalies/busy nil]
+           [(fn [_ _] (throw (java.net.ConnectException. "fixture-secret"))) :cognitect.anomalies/unavailable "fixture-secret"]
+           [(fn [_ _] (throw (java.net.SocketTimeoutException. "fixture-secret"))) :cognitect.anomalies/interrupted nil]
+           [(fn [_ _] {:status 200 :body "not JSON"}) :cognitect.anomalies/fault nil]
+           [(fn [_ _] {:status 200 :body "{}"}) :cognitect.anomalies/fault nil]
+           [(fn [_ _] {:status 200 :body "{\"detail\":\"fixture-secret\"}"}) :cognitect.anomalies/fault "fixture-secret"]
+           [(fn [_ _] {:status 200 :body "{\"answers\":[]}"}) :cognitect.anomalies/fault nil]]]
+    (let [result (ai/call! (request post!))
+          omitted (ai/call! (assoc-in (request post!) [:provider-options :omit-provider-error-message?] true))]
+      (is (= category (:cognitect.anomalies/category result) (:cognitect.anomalies/category omitted)))
+      (if message
+        (is (= message (:cognitect.anomalies/message result)))
+        (is (not (.contains (pr-str result) "fixture-secret"))))
+      (is (not (.contains (pr-str omitted) "fixture-secret"))))))
 
 (deftest endpoint-and-headers-can-be-configured
   (let [calls (atom [])
@@ -160,3 +168,28 @@
       (is (= (assoc-in answers [:team :choice] :billing)
              (ai/call! (update (request nil) :provider-options dissoc :post!)))))
     (is (= ["https://api.typesafe.ai/v1/systemone"] @calls))))
+
+(deftest extra-body-and-timeout-reach-the-request
+  (let [calls (atom [])
+        _ (ai/call! (update (request (fn [url opts]
+                                       (swap! calls conj [url opts])
+                                       (response answers)))
+                            :provider-options merge
+                            {:timeout-ms 5000
+                             :effort :high
+                             :extra-body {:temperature 0 "model" "evil" :state "evil"}}))
+        [_ opts] (first @calls)
+        body (json/read-str (:body opts))]
+    (is (= 5000 (:timeout opts)))
+    (is (= 0 (get body "temperature")))
+    (is (not= "evil" (get body "model")))
+    (is (= {"ticket" "Double charged"} (get body "state")))
+    (is (not-any? #{"effort" "reasoning_effort" "api_key" "post!" "timeout-ms"} (keys body)))))
+
+(deftest malformed-settings-fail-without-http
+  (doseq [bad [{:extra-body [:not :a :map]} {:timeout-ms -1}]]
+    (let [calls (atom 0)
+          result (ai/call! (update (request (fn [_ _] (swap! calls inc) (response answers)))
+                                   :provider-options merge bad))]
+      (is (= :cognitect.anomalies/incorrect (:cognitect.anomalies/category result)))
+      (is (zero? @calls)))))

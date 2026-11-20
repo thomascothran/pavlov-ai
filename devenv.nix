@@ -38,7 +38,21 @@ in
     pkgs.git
   ];
 
-  processes.clj.exec = "clj -A:dev:test -X dev/go!";
+  # API keys for live provider calls, read from ~/.secrets only when the REPL
+  # starts, so they are not exported into every devenv shell. A missing file
+  # leaves its variable unset.
+  scripts.clj-repl.exec = ''
+    load_secret() {
+      if [ -r "$HOME/.secrets/$2" ]; then
+        export "$1=$(tr -d '[:space:]' < "$HOME/.secrets/$2")"
+      fi
+    }
+    load_secret OPENROUTER_API_KEY pavlov-ai-openrouter-token
+    load_secret TYPESAFE_API_KEY pavlov-ai-jev-token
+    exec clj -A:dev:test -X dev/go! "$@"
+  '';
+
+  processes.clj.exec = "clj-repl";
 
   scripts.clj-test.exec = ''
     clj -X:test

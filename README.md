@@ -146,6 +146,53 @@ The first three are general-purpose models: you send a prompt or a conversation 
 
 All built-in providers currently run on the JVM only.
 
+### Common options
+
+A few `:provider-options` keys mean the same thing on every provider that supports them. Each provider puts them in the right place in its own request:
+
+| Option | `:openai-compatible` | `:claude-cli` | `:pi-cli` | Decision providers |
+| --- | --- | --- | --- | --- |
+| `:effort` | `reasoning_effort` in the body | `--effort` | `--thinking` | not sent |
+| `:timeout-ms` | HTTP request timeout | process timeout | process timeout | HTTP request timeout |
+| `:extra-body` | merged into the request body | — | — | merged into the request body |
+| `:omit-provider-error-message?` | generic anomaly messages | generic anomaly messages | generic anomaly messages | generic anomaly messages |
+
+`:effort` values are passed through unchanged (keywords by name) and are not checked by Pavlov AI. Models name their effort levels differently, so use whatever the model or CLI accepts; if it rejects the value, you get the usual anomaly, with the provider's explanation, such as the list of values the model accepts. `claude` and `pi` are exceptions: they ignore an unknown effort with a warning on stderr and use their default, so the call succeeds. Leave `:effort` out to use the provider's default.
+
+`:extra-body` reaches provider features that have no option of their own, such as a flex service tier, OpenRouter routing preferences or sampling parameters. It overrides the field `:effort` would produce, but cannot replace the fields the provider builds itself (`model`, `messages`, `response_format`, `stream`; or `model`, `state`, `questions`). Other keys in `:provider-options`, such as `:api-key` or `:post!`, are never sent in the body, and keys a provider does not recognize are ignored.
+
+When a call fails, the anomaly's `:cognitect.anomalies/message` is the provider's own error text, cut to 2,000 characters:
+
+- `:openai-compatible`: the error body's `message`, also under `[:error :message]`, plus `:provider-code`, `:provider-type` and `:provider-param` under `:error` when the provider sends them.
+- `:claude-cli` and `:pi-cli`: the CLI's error result or stderr, or why the CLI couldn't start.
+- Decision providers: OpenRouter's `error.message` or TypeSafe's `detail`, or why the connection failed.
+
+The model's reply text, non-JSON error bodies such as HTML pages, and credentials are never copied. Provider messages can repeat parts of your input, and anomalies end up in bprogram events and logs; set `:omit-provider-error-message? true` to replace the message with a generic one while keeping the code, type and param.
+
+```clojure
+{:provider :openai-compatible
+ :provider-options {:url "https://api.openai.com/v1/chat/completions"
+                    :model "gpt-6"
+                    :api-key (System/getenv "OPENAI_API_KEY")
+                    :effort :high
+                    :timeout-ms 600000
+                    :extra-body {:service_tier "flex"}}}
+```
+
+### Per-call settings
+
+A handler made with `ai/make-handler` uses its configured `:provider-options` for every call. A request event can change them for one call by carrying its own `:provider-options`, for example to switch model or effort:
+
+```clojure
+{:type :gemini-4-neon/invoke!
+ :input "Draft a short, polite decline."
+ :schema [:map [:subject :string] [:reply :string]]
+ :provider-options {:model "google/gemini-4-neon-pro" :effort :high}
+ ...}
+```
+
+Event options are merged over the handler's, one level deep, so an event `:extra-body` replaces the configured one rather than adding to it. An event cannot change where the call goes, its credentials or its transport: `:url`, `:api-key`, `:headers`, `:post!`, `:run!` and `:executable` in an event are ignored, as is an event `:provider`. This stops an event from sending the handler's API key to another endpoint.
+
 ### Adding a provider
 
 Providers are not a fixed list. To add one, define a method on `tech.thomascothran.pavlov.ai.provider/call!` for a new provider keyword. It receives your `:provider-options` along with the request's `:input`, `:messages` and `:schema`, and returns `{:data value}` or an anomaly. Pavlov AI validates the data against the schema, so the new provider works with existing bthreads and handlers unchanged.
@@ -177,8 +224,13 @@ Use `test-watch` to rerun tests as files change and `clj-build` to build the JAR
 
 ### Development nREPL
 
-Run `devenv up` to start the `clj` process, or start it directly with
-`clojure -X:dev:test dev/go!`. The server binds only to `127.0.0.1`, chooses
+Run `devenv up` to start the `clj` process, or run `clj-repl` inside the
+environment, or start it directly with `clojure -X:dev:test dev/go!`.
+`devenv up` and `clj-repl` export `OPENROUTER_API_KEY` and `TYPESAFE_API_KEY`
+from `~/.secrets/pavlov-ai-openrouter-token` and
+`~/.secrets/pavlov-ai-jev-token` when those files exist, for live provider
+calls from the REPL. The keys are set only in the REPL process, not in the
+devenv shell. The server binds only to `127.0.0.1`, chooses
 an available port, and writes it to `.nrepl-port` for editor/client discovery.
 This lets separate worktrees run servers without port collisions.
 For a fixed port, use `clojure -X:dev:test dev/go! :port 9898`.

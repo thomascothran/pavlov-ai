@@ -184,8 +184,8 @@
           [["missing :run!" {:run! nil}]
            ["missing :model" {:model nil}]
            ["blank :model" {:model " "}]
-           ["missing :effort" {:effort nil}]
-           ["unknown :effort" {:effort "extreme"}]
+           ["non-text :effort" {:effort 42}]
+           ["blank :effort" {:effort " "}]
            ["invalid :tools" {:tools "Read"}]]]
     (testing label
       (let [calls (atom [])
@@ -196,6 +196,18 @@
         (is (= :cognitect.anomalies/incorrect (category result)))
         (is (= :invalid-options (get-in result [:error :kind])))
         (is (empty? @calls))))))
+
+(deftest effort-is-optional-and-passed-through-unvalidated
+  (testing "without :effort, no --effort flag is sent"
+    (let [calls (atom [])
+          result (ai/call! (update (request (recording-run! calls))
+                                   :provider-options dissoc :effort))]
+      (is (= {:reply "Hi!"} result))
+      (is (not (some #{"--effort"} (:command (first @calls)))))))
+  (testing "any effort value reaches the CLI; the CLI decides what it accepts"
+    (let [calls (atom [])]
+      (ai/call! (request (recording-run! calls) {:effort :ultra-mega}))
+      (is (= "ultra-mega" (flag-value (:command (first @calls)) "--effort"))))))
 
 (deftest success-returns-schema-validated-structured-output
   (testing "valid output is decoded"
@@ -211,7 +223,12 @@
                  :result "fixture-secret"}
                 overrides)))
 
-(deftest cli-and-provider-failures-are-anomalies-without-copied-text
+(def ^:private copies-error-text
+  "Failures whose anomaly message is the CLI's own error text by default."
+  #{"non-zero exit" "rate limited" "not authenticated" "overloaded"
+    "is_error without status" "error subtype"})
+
+(deftest cli-and-provider-failures-are-anomalies-carrying-only-error-text
   (doseq [[label response expected]
           [["non-zero exit" {:exit 1 :out "fixture-secret" :err "fixture-secret"}
             :cognitect.anomalies/fault]
@@ -234,9 +251,21 @@
                                          :err ""}
             :cognitect.anomalies/fault]]]
     (testing label
-      (let [result (ai/call! (request (constantly response)))]
-        (is (= expected (category result)))
-        (is (not (str/includes? (pr-str result) "fixture-secret")))))))
+      (let [result (ai/call! (request (constantly response)))
+            omitted (ai/call! (request (constantly response)
+                                       {:omit-provider-error-message? true}))]
+        (is (= expected (category result) (category omitted)))
+        (testing "error text is copied by default; reply text never is"
+          (is (= (contains? copies-error-text label)
+                 (str/includes? (:cognitect.anomalies/message result) "fixture-secret"))))
+        (testing "with :omit-provider-error-message?, nothing is copied"
+          (is (not (str/includes? (pr-str omitted) "fixture-secret"))))))))
+
+(deftest result-errors-list-is-used-when-result-text-is-absent
+  (let [result (ai/call! (request (constantly {:exit 1 :err ""
+                                               :out (error-result {:result nil
+                                                                   :errors ["first" "second"]})})))]
+    (is (= "first; second" (:cognitect.anomalies/message result)))))
 
 (deftest process-failures-are-anomalies
   (doseq [[label ex expected]
@@ -245,9 +274,13 @@
            ["missing binary" (java.io.IOException. "Cannot run program \"claude\": fixture-secret")
             :cognitect.anomalies/unavailable]]]
     (testing label
-      (let [result (ai/call! (request (fn [_] (throw ex))))]
-        (is (= expected (category result)))
-        (is (not (str/includes? (pr-str result) "fixture-secret")))))))
+      (let [result (ai/call! (request (fn [_] (throw ex))))
+            omitted (ai/call! (request (fn [_] (throw ex)) {:omit-provider-error-message? true}))]
+        (is (= expected (category result) (category omitted)))
+        (testing "only the start failure's message is copied by default"
+          (is (= (= "missing binary" label)
+                 (str/includes? (pr-str result) "fixture-secret"))))
+        (is (not (str/includes? (pr-str omitted) "fixture-secret")))))))
 
 (deftest run-process-is-the-shared-runner
   (is (identical? process/run-process claude-cli/run-process)))
